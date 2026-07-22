@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  dotnet:
+    name: sim-core / world-server / gateway
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - run: dotnet build packages/sim-core
+      - run: dotnet build packages/shared-proto
+      - run: dotnet build apps/world-server
+      - run: dotnet build apps/gateway
+      - run: dotnet test tests/sim-core.tests
+
+  client:
+    name: godot client
+    runs-on: ubuntu-latest
+    env:
+      GODOT_VERSION: 4.3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Godot (mono)
+        run: |
+          curl -sSL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_mono_linux_x86_64.zip"
+          unzip -q godot.zip
+          echo "$PWD/Godot_v${GODOT_VERSION}-stable_mono_linux_x86_64" >> "$GITHUB_PATH"
+      - name: Build client assemblies
+        run: dotnet build apps/client/AshfallClient.csproj
+      - name: Import project (headless validation)
+        working-directory: apps/client
+        run: Godot_v${GODOT_VERSION}-stable_mono_linux.x86_64 --headless --import --quit

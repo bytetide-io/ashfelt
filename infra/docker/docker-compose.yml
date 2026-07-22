@@ -1,0 +1,36 @@
+name: ashfall
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ashfall
+      POSTGRES_PASSWORD: ashfall
+      POSTGRES_DB: ashfall
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ashfall"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  world-server:
+    build:
+      context: ../..
+      dockerfile: infra/docker/world-server.Dockerfile
+    environment:
+      ASHFALL_PORT: "9050"
+      ASHFALL_SEED: "1337"
+      ASHFALL_DB: "Host=postgres;Username=ashfall;Password=ashfall;Database=ashfall"
+    ports:
+      - "9050:9050/udp"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

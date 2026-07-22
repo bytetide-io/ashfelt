@@ -1,0 +1,17 @@
+[gd_scene load_steps=4 format=3 uid="uid://bashfallmain01"]
+
+[ext_resource type="Script" path="res://scripts/Main.cs" id="1_main"]
+[ext_resource type="Script" path="res://scripts/WorldConnection.cs" id="2_conn"]
+[ext_resource type="Script" path="res://scripts/ChunkRenderer.cs" id="3_render"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+
+[node name="WorldConnection" type="Node" parent="."]
+script = ExtResource("2_conn")
+
+[node name="ChunkRenderer" type="Node2D" parent="."]
+script = ExtResource("3_render")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+zoom = Vector2(1.5, 1.5)

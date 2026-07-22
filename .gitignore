@@ -1,0 +1,14 @@
+bin/
+obj/
+build/
+.vs/
+.idea/
+*.user
+
+# Godot
+.godot/
+.mono/
+apps/client/android/
+apps/client/export_presets.local.cfg
+
+.DS_Store

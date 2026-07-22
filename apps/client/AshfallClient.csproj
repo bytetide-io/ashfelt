@@ -1,0 +1,19 @@
+<Project Sdk="Godot.NET.Sdk/4.3.0">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>Ashfall.Client</RootNamespace>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Terrain and rules come from sim-core. Never reimplement them here:
+         the client must derive identical results to the world-server. -->
+    <ProjectReference Include="../../packages/sim-core/SimCore.csproj" />
+    <ProjectReference Include="../../packages/shared-proto/SharedProto.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LiteNetLib" Version="1.3.1" />
+  </ItemGroup>
+</Project>
