@@ -1,10 +1,11 @@
-[gd_scene load_steps=6 format=3 uid="uid://bashfallmain01"]
+[gd_scene load_steps=7 format=3 uid="uid://bashfallmain01"]
 
 [ext_resource type="Script" path="res://scripts/Main.cs" id="1_main"]
 [ext_resource type="Script" path="res://scripts/WorldConnection.cs" id="2_conn"]
 [ext_resource type="Script" path="res://scripts/ChunkRenderer.cs" id="3_render"]
 [ext_resource type="Script" path="res://scripts/PlayerRenderer.cs" id="4_players"]
 [ext_resource type="Script" path="res://scripts/TouchInput.cs" id="5_input"]
+[ext_resource type="Script" path="res://scripts/DebugCapture.cs" id="6_capture"]
 
 [node name="Main" type="Node2D"]
 script = ExtResource("1_main")
@@ -14,6 +15,9 @@ script = ExtResource("2_conn")
 
 [node name="TouchInput" type="Node" parent="."]
 script = ExtResource("5_input")
+
+[node name="DebugCapture" type="Node" parent="."]
+script = ExtResource("6_capture")
 
 [node name="ChunkRenderer" type="Node2D" parent="."]
 script = ExtResource("3_render")
