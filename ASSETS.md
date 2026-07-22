@@ -17,6 +17,17 @@ python3 tools/gen_placeholder_art.py
 godot --headless --import --path apps/client
 ```
 
+Godot ships as an app bundle with no command-line entry, so `godot` only
+exists if you put it on your PATH:
+
+```bash
+ln -sf /path/to/Godot_mono.app/Contents/MacOS/Godot ~/.local/bin/godot
+```
+
+The import step prints `.NET: Assemblies not found`. That is the headless
+editor noting it has no built C# assembly; texture import does not need one
+and completes normally.
+
 | File | Size | Purpose |
 |---|---|---|
 | `terrain.png` | 128x192 | Ground atlas: 4 variants x 6 tile types, one row per `TileType` |
