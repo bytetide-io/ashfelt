@@ -76,6 +76,7 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
         case MessageId.RequestChunk:
         {
             var coord = new ChunkCoord(reader.GetInt(), reader.GetInt());
+            Console.WriteLine($"[world] player {player.Id} requested chunk ({coord.X},{coord.Y})");
             // Terrain is regenerated from the seed, with stored diffs layered
             // on top — chunks themselves are never persisted.
             var chunk = world.GenerateChunk(coord);

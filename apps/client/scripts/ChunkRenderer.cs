@@ -30,6 +30,8 @@ public partial class ChunkRenderer : Node2D
         QueueRedraw();
     }
 
+    public int ChunkCount => _chunks.Count;
+
     public bool HasChunk(ChunkCoord coord) => _chunks.ContainsKey(coord);
 
     /// <summary>Applies a single authoritative tile diff from the server.</summary>
