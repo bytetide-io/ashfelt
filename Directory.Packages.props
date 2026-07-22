@@ -1,0 +1,21 @@
+<Project>
+  <PropertyGroup>
+    <!-- Central package management: versions live here only, so the client and
+         world-server can never drift onto different LiteNetLib builds. A
+         mismatch is not a build error — it fails at runtime as an
+         InvalidProtocol disconnect, which is far harder to diagnose. -->
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageVersion Include="LiteNetLib" Version="2.1.4" />
+    <PackageVersion Include="Npgsql" Version="10.0.3" />
+  </ItemGroup>
+
+  <ItemGroup Label="Test">
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+  </ItemGroup>
+</Project>

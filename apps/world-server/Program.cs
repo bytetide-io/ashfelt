@@ -134,7 +134,13 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
     reader.Recycle();
 };
 
-server.Start(port);
+if (!server.Start(port))
+{
+    // Without this check a failed bind still reached the tick loop and logged
+    // "listening", so a second instance looked healthy while accepting nothing.
+    Console.Error.WriteLine($"[world] FATAL: could not bind udp/{port} — is another world-server running?");
+    return 1;
+}
 Console.WriteLine($"[world] listening on udp/{port}");
 
 using var shutdown = new ManualResetEventSlim();
@@ -185,6 +191,7 @@ while (!shutdown.IsSet)
 
 server.Stop();
 Console.WriteLine("[world] stopped");
+return 0;
 
 void Broadcast(NetDataWriter data, NetPeer? exclude = null,
     DeliveryMethod method = DeliveryMethod.ReliableOrdered)
