@@ -1,0 +1,11 @@
+{
+  "enabledPlugins": {},
+  "extraKnownMarketplaces": {
+    "cascade-code-languages-misc-2": {
+      "source": {
+        "source": "github",
+        "repo": "joshuarweaver/cascade-code-languages-misc-2"
+      }
+    }
+  }
+}

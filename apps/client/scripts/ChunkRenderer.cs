@@ -30,6 +30,28 @@ public partial class ChunkRenderer : Node2D
         QueueRedraw();
     }
 
+    public bool HasChunk(ChunkCoord coord) => _chunks.ContainsKey(coord);
+
+    /// <summary>Applies a single authoritative tile diff from the server.</summary>
+    public void SetTile(int wx, int wy, TileType tile)
+    {
+        var coord = World.ChunkOf(wx, wy);
+        if (!_chunks.TryGetValue(coord, out var tiles)) return;
+
+        int size = TerrainGenerator.ChunkSize;
+        tiles[(wy - coord.Y * size) * size + (wx - coord.X * size)] = tile;
+        QueueRedraw();
+    }
+
+    public TileType? TileAt(int wx, int wy)
+    {
+        var coord = World.ChunkOf(wx, wy);
+        if (!_chunks.TryGetValue(coord, out var tiles)) return null;
+
+        int size = TerrainGenerator.ChunkSize;
+        return tiles[(wy - coord.Y * size) * size + (wx - coord.X * size)];
+    }
+
     public override void _Draw()
     {
         int size = TerrainGenerator.ChunkSize;

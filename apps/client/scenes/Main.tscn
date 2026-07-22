@@ -1,8 +1,10 @@
-[gd_scene load_steps=4 format=3 uid="uid://bashfallmain01"]
+[gd_scene load_steps=6 format=3 uid="uid://bashfallmain01"]
 
 [ext_resource type="Script" path="res://scripts/Main.cs" id="1_main"]
 [ext_resource type="Script" path="res://scripts/WorldConnection.cs" id="2_conn"]
 [ext_resource type="Script" path="res://scripts/ChunkRenderer.cs" id="3_render"]
+[ext_resource type="Script" path="res://scripts/PlayerRenderer.cs" id="4_players"]
+[ext_resource type="Script" path="res://scripts/TouchInput.cs" id="5_input"]
 
 [node name="Main" type="Node2D"]
 script = ExtResource("1_main")
@@ -10,8 +12,23 @@ script = ExtResource("1_main")
 [node name="WorldConnection" type="Node" parent="."]
 script = ExtResource("2_conn")
 
+[node name="TouchInput" type="Node" parent="."]
+script = ExtResource("5_input")
+
 [node name="ChunkRenderer" type="Node2D" parent="."]
 script = ExtResource("3_render")
 
+[node name="PlayerRenderer" type="Node2D" parent="."]
+script = ExtResource("4_players")
+
 [node name="Camera2D" type="Camera2D" parent="."]
-zoom = Vector2(1.5, 1.5)
+zoom = Vector2(2, 2)
+
+[node name="Hud" type="CanvasLayer" parent="."]
+
+[node name="Inventory" type="Label" parent="Hud"]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 500.0
+offset_bottom = 48.0
+text = "Inventory: empty"

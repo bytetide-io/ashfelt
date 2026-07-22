@@ -41,12 +41,26 @@ docker compose -f infra/docker/docker-compose.yml up
 The client connects to `127.0.0.1:9050` by default — change `Host`/`Port` on
 the `WorldConnection` node for LAN or VPS testing.
 
+## Controls
+
+Drag anywhere to move, tap a tree or rock to harvest it. Arrow keys work in the
+editor for desktop testing.
+
 ## Status
 
-Phase 0 complete: monorepo scaffolded, deterministic terrain generator with
-tests, world-server serving chunks over UDP, client rendering them, Postgres
-schema and CI in place. Next is Phase 1 — movement, chopping, and persistence
-of the first diff.
+**Phase 0 complete** — monorepo, deterministic terrain generator, UDP
+world-server, Postgres schema, CI.
+
+**Phase 1 complete** — the vertical slice runs end to end:
+
+- server-authoritative movement at 15 Hz, with client-side prediction and
+  reconciliation
+- multiple players on one world, seeing each other move
+- harvest a tree → receive wood → tile becomes grass for everyone
+- diffs persist to Postgres and are replayed on restart
+
+Next is Phase 2: inventory schema, crafting, building placement, and a
+day/night or hunger tick.
 
 See `docs/architecture.md` before adding anything; the invariants there
 (server-authoritative, seed+diffs, one shared sim library) are load-bearing.

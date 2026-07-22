@@ -1,43 +1,182 @@
+using System.Collections.Generic;
+using Ashfall.Proto;
 using Ashfall.SimCore;
 using Godot;
 
 namespace Ashfall.Client;
 
 /// <summary>
-/// Phase 0 entry point: connect to the world-server and render the chunks
-/// around the origin. Movement and prediction arrive in Phase 1.
+/// Phase 1 entry point: predicted movement, tap-to-chop, and rendering of the
+/// authoritative world. The server owns all state; prediction here is purely
+/// cosmetic and is corrected by every snapshot.
 /// </summary>
 public partial class Main : Node2D
 {
-    private const int ViewRadiusInChunks = 1;
+    /// <summary>How hard a server correction pulls the predicted position back.</summary>
+    private const float ReconcileRate = 6f;
+
+    /// <summary>Beyond this error, in tiles, we snap instead of easing.</summary>
+    private const float SnapDistanceTiles = 3f;
 
     private WorldConnection _connection = null!;
     private ChunkRenderer _renderer = null!;
+    private PlayerRenderer _players = null!;
+    private TouchInput _input = null!;
     private Camera2D _camera = null!;
+    private Label _hud = null!;
+
+    private int _playerId = -1;
+    private Vector2 _predicted;
+    private Vector2 _authoritative;
+    private bool _spawned;
+    private Vector2 _lastSentIntent = Vector2.Inf;
+    private readonly Dictionary<ItemId, int> _inventory = new();
+    private readonly HashSet<ChunkCoord> _requested = new();
 
     public override void _Ready()
     {
         _connection = GetNode<WorldConnection>("WorldConnection");
         _renderer = GetNode<ChunkRenderer>("ChunkRenderer");
+        _players = GetNode<PlayerRenderer>("PlayerRenderer");
+        _input = GetNode<TouchInput>("TouchInput");
         _camera = GetNode<Camera2D>("Camera2D");
+        _hud = GetNode<Label>("Hud/Inventory");
 
-        int span = TerrainGenerator.ChunkSize * ChunkRenderer.TilePixels;
-        _camera.Position = new Vector2(span / 2f, span / 2f);
-
-        _connection.Welcomed += (_, _) =>
-        {
-            for (int cy = -ViewRadiusInChunks; cy <= ViewRadiusInChunks; cy++)
-                for (int cx = -ViewRadiusInChunks; cx <= ViewRadiusInChunks; cx++)
-                    _connection.RequestChunk(new ChunkCoord(cx, cy));
-        };
-
+        _connection.Welcomed += (_, _, playerId, x, y) => CallDeferred(nameof(OnWelcomed), playerId, x, y);
         _connection.ChunkReceived += (coord, tiles) =>
-            CallDeferred(nameof(ApplyChunk), coord.X, coord.Y, System.Array.ConvertAll(tiles, t => (byte)t));
+            CallDeferred(nameof(OnChunk), coord.X, coord.Y, System.Array.ConvertAll(tiles, t => (byte)t));
+        _connection.TileChanged += (x, y, tile) =>
+            CallDeferred(nameof(OnTileChanged), x, y, (byte)tile);
+        _connection.PlayersUpdated += OnPlayers;
+        _connection.PlayerLeft += id => CallDeferred(nameof(OnPlayerLeft), id);
+        _connection.InventoryUpdated += OnInventory;
     }
 
-    private void ApplyChunk(int cx, int cy, byte[] tiles)
+    private void OnWelcomed(int playerId, float x, float y)
     {
-        var typed = System.Array.ConvertAll(tiles, b => (TileType)b);
-        _renderer.SetChunk(new ChunkCoord(cx, cy), typed);
+        _playerId = playerId;
+        _predicted = _authoritative = new Vector2(x, y);
+        _players.LocalId = playerId;
+        _spawned = true;
+        RequestChunksAround(_predicted);
+    }
+
+    private void OnChunk(int cx, int cy, byte[] tiles)
+    {
+        _renderer.SetChunk(new ChunkCoord(cx, cy),
+            System.Array.ConvertAll(tiles, b => (TileType)b));
+    }
+
+    private void OnTileChanged(int x, int y, byte tile) => _renderer.SetTile(x, y, (TileType)tile);
+
+    private void OnPlayerLeft(int id) => _players.Remove(id);
+
+    private void OnPlayers(IReadOnlyList<PlayerState> states)
+    {
+        foreach (var state in states)
+            if (state.Id == _playerId)
+                _authoritative = new Vector2(state.X, state.Y);
+
+        _players.ApplySnapshot(states);
+    }
+
+    private void OnInventory(IReadOnlyDictionary<ItemId, int> inventory)
+    {
+        _inventory.Clear();
+        foreach (var (item, amount) in inventory) _inventory[item] = amount;
+        CallDeferred(nameof(RefreshHud));
+    }
+
+    private void RefreshHud()
+    {
+        if (_inventory.Count == 0) { _hud.Text = "Inventory: empty"; return; }
+
+        var parts = new List<string>();
+        foreach (var (item, amount) in _inventory) parts.Add($"{item} x{amount}");
+        _hud.Text = "Inventory: " + string.Join("  ", parts);
+    }
+
+    public override void _Process(double delta)
+    {
+        if (!_spawned) return;
+
+        var direction = _input.Direction;
+        if (!direction.IsEqualApprox(_lastSentIntent))
+        {
+            _connection.SendMoveIntent(direction);
+            _lastSentIntent = direction;
+        }
+
+        Predict(direction, (float)delta);
+        Reconcile((float)delta);
+
+        _players.LocalPosition = _predicted;
+        _camera.Position = _predicted * ChunkRenderer.TilePixels;
+
+        if (_input.ConsumeTap() is { } tap) TryChopAt(tap);
+
+        RequestChunksAround(_predicted);
+    }
+
+    /// <summary>
+    /// Runs the same movement rule the server uses, against the tiles we have.
+    /// This only hides latency — the server's result always wins.
+    /// </summary>
+    private void Predict(Vector2 direction, float delta)
+    {
+        if (direction == Vector2.Zero) return;
+
+        float step = Tuning.MoveTilesPerSecond * delta;
+        var next = _predicted + direction.LimitLength(1f) * step;
+
+        if (IsWalkable(next.X, _predicted.Y)) _predicted.X = next.X;
+        if (IsWalkable(_predicted.X, next.Y)) _predicted.Y = next.Y;
+    }
+
+    private void Reconcile(float delta)
+    {
+        float error = _predicted.DistanceTo(_authoritative);
+        if (error > SnapDistanceTiles) _predicted = _authoritative;
+        else if (error > 0.01f)
+            _predicted = _predicted.Lerp(_authoritative, Mathf.Min(1f, ReconcileRate * delta));
+    }
+
+    private bool IsWalkable(float x, float y)
+    {
+        var tile = _renderer.TileAt(Mathf.FloorToInt(x), Mathf.FloorToInt(y));
+        // Unknown terrain is treated as walkable: the server will correct us
+        // rather than the player being stuck at an unloaded chunk edge.
+        return tile is null || TerrainGenerator.IsWalkable(tile.Value);
+    }
+
+    private void TryChopAt(Vector2 screenPosition)
+    {
+        var world = _camera.GetCanvasTransform().AffineInverse() * screenPosition;
+        int tx = Mathf.FloorToInt(world.X / ChunkRenderer.TilePixels);
+        int ty = Mathf.FloorToInt(world.Y / ChunkRenderer.TilePixels);
+
+        var tile = _renderer.TileAt(tx, ty);
+        if (tile is null || !HarvestRules.IsHarvestable(tile.Value)) return;
+
+        // Range is enforced server-side; checking here avoids a pointless packet.
+        if (_predicted.DistanceTo(new Vector2(tx + 0.5f, ty + 0.5f)) > Tuning.ChopRangeTiles) return;
+
+        _connection.SendChop(tx, ty);
+    }
+
+    private void RequestChunksAround(Vector2 position)
+    {
+        var centre = World.ChunkOf(Mathf.FloorToInt(position.X), Mathf.FloorToInt(position.Y));
+        int r = Tuning.InterestRadiusChunks;
+
+        for (int cy = centre.Y - r; cy <= centre.Y + r; cy++)
+        {
+            for (int cx = centre.X - r; cx <= centre.X + r; cx++)
+            {
+                var coord = new ChunkCoord(cx, cy);
+                if (_renderer.HasChunk(coord) || !_requested.Add(coord)) continue;
+                _connection.RequestChunk(coord);
+            }
+        }
     }
 }
