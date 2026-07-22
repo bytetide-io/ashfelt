@@ -24,12 +24,17 @@ var server = new NetManager(listener) { UpdateTime = 15 };
 
 listener.ConnectionRequestEvent += request => request.AcceptIfKey(key);
 
+var clock = System.Diagnostics.Stopwatch.StartNew();
+double Now() => clock.Elapsed.TotalSeconds;
+
 listener.PeerConnectedEvent += peer =>
 {
-    var (sx, sy) = Player.FindSpawn(world);
-    var player = new Player(nextPlayerId++, peer, sx, sy);
+    var spawn = Player.FindSpawn(world, world.Terrain);
+    var player = new Player(nextPlayerId++, peer, spawn);
+    player.ResetClock(Now());
     players[peer] = player;
-    Console.WriteLine($"[world] player {player.Id} connected from {peer.Address} at ({sx:F1},{sy:F1})");
+    Console.WriteLine($"[world] player {player.Id} connected from {peer.Address} " +
+                      $"at ({spawn.X:F1},{spawn.Y:F1},{spawn.Z:F1})");
 };
 
 listener.PeerDisconnectedEvent += (peer, info) =>
@@ -66,8 +71,9 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             writer.Put(seed);
             writer.Put(TerrainGenerator.ChunkSize);
             writer.Put(player.Id);
-            writer.Put(player.X);
-            writer.Put(player.Y);
+            writer.Put((float)player.Position.X);
+            writer.Put((float)player.Position.Y);
+            writer.Put((float)player.Position.Z);
             peer.Send(writer, DeliveryMethod.ReliableOrdered);
             player.InventoryDirty = true;
             break;
@@ -90,12 +96,24 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             break;
         }
 
-        case MessageId.MoveIntent:
+        case MessageId.ClientState:
         {
-            // Input only. The server integrates it on tick; the client never
-            // tells us where it is.
-            player.IntentX = reader.GetFloat();
-            player.IntentY = reader.GetFloat();
+            var reported = new Vec3(reader.GetFloat(), reader.GetFloat(), reader.GetFloat());
+            float yaw = reader.GetFloat();
+
+            // The client simulates physics; the server decides whether the
+            // result was possible. Anything else is taken on trust nowhere.
+            var rejection = player.TryAccept(world.Terrain, reported, yaw, Now());
+            if (rejection == MoveRejection.None) break;
+
+            Console.WriteLine($"[world] player {player.Id} move rejected: {rejection}");
+            writer.Reset();
+            writer.Put((byte)MessageId.Correction);
+            writer.Put((float)player.Position.X);
+            writer.Put((float)player.Position.Y);
+            writer.Put((float)player.Position.Z);
+            writer.Put((byte)rejection);
+            peer.Send(writer, DeliveryMethod.ReliableOrdered);
             break;
         }
 
@@ -147,14 +165,11 @@ Console.WriteLine($"[world] listening on udp/{port}");
 using var shutdown = new ManualResetEventSlim();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; shutdown.Set(); };
 
-const float dt = 1f / Tuning.TicksPerSecond;
 int tickMs = 1000 / Tuning.TicksPerSecond;
 
 while (!shutdown.IsSet)
 {
     server.PollEvents();
-
-    foreach (var player in players.Values) player.Tick(world, dt);
 
     if (players.Count > 0)
     {
@@ -164,8 +179,10 @@ while (!shutdown.IsSet)
         foreach (var player in players.Values)
         {
             writer.Put(player.Id);
-            writer.Put(player.X);
-            writer.Put(player.Y);
+            writer.Put((float)player.Position.X);
+            writer.Put((float)player.Position.Y);
+            writer.Put((float)player.Position.Z);
+            writer.Put(player.Yaw);
         }
         // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
         Broadcast(writer, method: DeliveryMethod.Unreliable);

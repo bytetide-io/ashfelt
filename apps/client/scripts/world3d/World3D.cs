@@ -13,15 +13,80 @@ namespace Ashfall.Client;
 /// </summary>
 public partial class World3D : Node3D
 {
-    [Export] public uint Seed { get; set; } = 1337;
-
     /// <summary>Chunks generated around the origin for this first slice.</summary>
     [Export] public int Radius { get; set; } = 2;
+
+    /// <summary>Seed supplied by the server on welcome.</summary>
+    public uint Seed { get; private set; }
 
     private TerrainGenerator _terrain = null!;
     private readonly List<MultiMesh> _foliage = new();
 
+    private WorldConnection _connection = null!;
+    private PlayerBody _player = null!;
+    private Label _status = null!;
+    private RemotePlayers _remotes = null!;
+    private double _reportTimer;
+    private bool _built;
+
     public override void _Ready()
+    {
+        _connection = GetNode<WorldConnection>("WorldConnection");
+        _player = GetNode<PlayerBody>("Player");
+        _status = GetNode<Label>("Hud/Status");
+        _remotes = GetNode<RemotePlayers>("RemotePlayers");
+
+        // Nothing is generated until the server says which world this is: the
+        // seed is the server's to decide, exactly as in the 2D client.
+        _player.ProcessMode = ProcessModeEnum.Disabled;
+        _connection.StatusChanged += status => CallDeferred(nameof(ShowStatus), status);
+        _connection.Welcomed += (seed, _, id, spawn) => CallDeferred(nameof(OnWelcomed), seed, id, spawn);
+        _connection.Corrected += (position, reason) =>
+            CallDeferred(nameof(OnCorrected), position, (int)reason);
+        _connection.PlayersUpdated += states => _remotes.Apply(states, _localId);
+        _connection.PlayerLeft += id => CallDeferred(nameof(OnPlayerLeft), id);
+        ShowStatus(_connection.Status);
+    }
+
+    private int _localId = -1;
+
+    private void ShowStatus(string status)
+    {
+        _status.Text = status;
+        _status.Visible = !string.IsNullOrEmpty(status);
+    }
+
+    private void OnPlayerLeft(int id) => _remotes.Remove(id);
+
+    /// <summary>The server rejected local physics; snap back to its answer.</summary>
+    private void OnCorrected(Vector3 position, int reason)
+    {
+        GD.Print($"[client] corrected by server: {(MoveRejection)reason}");
+        _player.Teleport(position);
+    }
+
+    private void OnWelcomed(uint seed, int playerId, Vector3 spawn)
+    {
+        _localId = playerId;
+        Seed = seed;
+        Build();
+        _player.Teleport(spawn + Vector3.Up * 1.5f);
+        _player.ProcessMode = ProcessModeEnum.Inherit;
+    }
+
+    public override void _Process(double delta)
+    {
+        if (!_built) return;
+
+        _reportTimer += delta;
+        double interval = 1.0 / Proto.Tuning.ClientStateHz;
+        if (_reportTimer < interval) return;
+        _reportTimer = 0;
+
+        _connection.SendClientState(_player.GlobalPosition, _player.Facing);
+    }
+
+    private void Build()
     {
         _terrain = new TerrainGenerator(Seed);
 
@@ -63,40 +128,8 @@ public partial class World3D : Node3D
             Rings = 5,
         }, new Color("3c7a42")));
 
-        PlacePlayer();
-
+        _built = true;
         GD.Print($"[world3d] built {(Radius * 2 + 1) * (Radius * 2 + 1)} chunks, {trunks.Count} trees");
-    }
-
-    /// <summary>
-    /// Drops the player onto dry land near the origin, rather than wherever
-    /// the scene happened to put them — which might be the seabed.
-    /// </summary>
-    private void PlacePlayer()
-    {
-        var player = GetNodeOrNull<Node3D>("Player");
-        if (player is null) return;
-
-        double metres = TerrainGenerator.TileMetres;
-        for (int radius = 0; radius < 200; radius++)
-        {
-            for (int dy = -radius; dy <= radius; dy++)
-            {
-                for (int dx = -radius; dx <= radius; dx++)
-                {
-                    if (System.Math.Abs(dx) != radius && System.Math.Abs(dy) != radius) continue;
-                    if (_terrain.TileAt(dx, dy) is not (TileType.Grass or TileType.Sand)) continue;
-
-                    // A little above the surface so the first physics tick
-                    // settles the capsule onto the ground instead of inside it.
-                    player.Position = new Vector3(
-                        (float)((dx + 0.5) * metres),
-                        (float)_terrain.HeightAt(dx + 0.5, dy + 0.5) + 2f,
-                        (float)((dy + 0.5) * metres));
-                    return;
-                }
-            }
-        }
     }
 
     /// <summary>

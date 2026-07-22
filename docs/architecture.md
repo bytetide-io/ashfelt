@@ -27,23 +27,28 @@ drives both the surface classification and the mesh, so the two can never
 disagree. It is in `sim-core` precisely because the server will need identical
 heights for collision.
 
-**Open decision — server-authoritative physics.** Invariant 1 below says the
-server owns movement. With grid movement that was a tile lookup. With physics
-it means the server must simulate collision against the same terrain. The
-candidates:
+### Movement authority: the client simulates, the server validates
 
-1. **Headless Godot world-server.** Server and client run the same physics
-   engine against the same mesh, so results agree by construction. Costs: the
-   world-server stops being a plain .NET service and gains an engine
-   dependency.
-2. **.NET server with a physics library** (BepuPhysics). Keeps the service
-   lean, but terrain collision must be rebuilt server-side and the two engines
-   will disagree at the margins.
-3. **Client-authoritative with server validation** — trust client positions,
-   reject implausible speed or teleports. Cheapest, and what several shipped
-   survival games do; weakest against cheating.
+**Decided.** The client runs physics and reports where it ended up. The server
+runs no physics engine; it checks each reported position against the height
+field it already computes, and corrects anything implausible
+(`MovementRules.Check` in sim-core, shared by both sides).
 
-Until this is decided, movement in the 3D client is **client-side only**.
+Why not run physics on the server: it costs an engine dependency and a second
+implementation that will disagree with the first at the margins — and
+disagreement surfaces as rubber-banding on slopes, exactly where players
+notice. Bounding what physics can *possibly* produce is far cheaper and
+rejects every cheat that matters: speed hacks, teleports, flight, and moving
+through terrain all violate a speed bound or the height field.
+
+What this does not catch: a client moving legally but in ways a human could
+not, such as perfect aim-walking or subtly favourable collision resolution.
+That is an accepted trade. If PvP ever makes it matter, a headless Godot
+world-server sharing the client's physics engine is the upgrade path, and
+nothing in the protocol has to change.
+
+The rules live in `sim-core` so the client can check itself against the same
+bounds before sending, and a legitimate player is never corrected.
 
 ## Invariants
 

@@ -4,6 +4,8 @@
 [ext_resource type="Script" path="res://scripts/world3d/PlayerBody.cs" id="2_player"]
 [ext_resource type="Script" path="res://scripts/world3d/OrbitCamera.cs" id="3_camera"]
 [ext_resource type="Script" path="res://scripts/DebugCapture.cs" id="4_capture"]
+[ext_resource type="Script" path="res://scripts/WorldConnection.cs" id="5_conn"]
+[ext_resource type="Script" path="res://scripts/world3d/RemotePlayers.cs" id="6_remotes"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
 sky_horizon_color = Color(0.65, 0.72, 0.78, 1)
@@ -77,3 +79,26 @@ fov = 70.0
 
 [node name="DebugCapture" type="Node" parent="."]
 script = ExtResource("4_capture")
+
+[node name="WorldConnection" type="Node" parent="."]
+script = ExtResource("5_conn")
+
+[node name="RemotePlayers" type="Node3D" parent="."]
+script = ExtResource("6_remotes")
+
+[node name="Hud" type="CanvasLayer" parent="."]
+
+[node name="Status" type="Label" parent="Hud"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -220.0
+offset_top = -30.0
+offset_right = 220.0
+offset_bottom = 30.0
+horizontal_alignment = 1
+vertical_alignment = 1
+autowrap_mode = 2
+text = "Connecting…"

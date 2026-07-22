@@ -5,29 +5,33 @@ using LiteNetLib;
 namespace Ashfall.WorldServer;
 
 /// <summary>
-/// A connected player. Position here is authoritative; the client's own copy
-/// is a prediction that gets corrected by the next state broadcast.
+/// A connected player. The client simulates its own physics and reports where
+/// it ended up; this class holds the last position the server was willing to
+/// believe. That accepted position — never the client's claim — is what other
+/// players see and what harvesting range is measured from.
 /// </summary>
 public sealed class Player
 {
-    public Player(int id, NetPeer peer, float x, float y)
+    public Player(int id, NetPeer peer, Vec3 position)
     {
         Id = id;
         Peer = peer;
-        X = x;
-        Y = y;
+        Position = position;
     }
 
     public int Id { get; }
     public NetPeer Peer { get; }
 
-    /// <summary>Position in tile units (fractional).</summary>
-    public float X { get; private set; }
-    public float Y { get; private set; }
+    /// <summary>Last accepted position, in metres.</summary>
+    public Vec3 Position { get; private set; }
 
-    /// <summary>Latest input direction, normalised, from the client.</summary>
-    public float IntentX { get; set; }
-    public float IntentY { get; set; }
+    /// <summary>Facing, in radians, for rendering other players.</summary>
+    public float Yaw { get; private set; }
+
+    /// <summary>Server time of the last accepted position, for speed budgeting.</summary>
+    public double LastAcceptedAt { get; private set; }
+
+    public int Rejections { get; private set; }
 
     public Dictionary<ItemId, int> Inventory { get; } = new();
     public bool InventoryDirty { get; set; }
@@ -39,37 +43,44 @@ public sealed class Player
     }
 
     /// <summary>
-    /// Advances the player by one tick, refusing movement into unwalkable
-    /// tiles. Axes resolve independently so sliding along a wall works.
+    /// Validates a reported position. Returns the rejection reason, or None if
+    /// the move was accepted and <see cref="Position"/> updated.
     /// </summary>
-    public void Tick(World world, float dt)
+    public MoveRejection TryAccept(TerrainGenerator terrain, Vec3 reported, float yaw, double now)
     {
-        if (IntentX == 0 && IntentY == 0) return;
+        // Budget is elapsed time since the last *accepted* position, so
+        // spamming updates cannot buy extra distance.
+        double delta = now - LastAcceptedAt;
+        var rejection = MovementRules.Check(terrain, Position, reported, delta);
 
-        float len = MathF.Sqrt(IntentX * IntentX + IntentY * IntentY);
-        if (len > 1f) { IntentX /= len; IntentY /= len; }
+        if (rejection != MoveRejection.None)
+        {
+            Rejections++;
+            return rejection;
+        }
 
-        float step = Tuning.MoveTilesPerSecond * dt;
-        float nx = X + IntentX * step;
-        float ny = Y + IntentY * step;
-
-        if (IsWalkable(world, nx, Y)) X = nx;
-        if (IsWalkable(world, X, ny)) Y = ny;
+        Position = reported;
+        Yaw = yaw;
+        LastAcceptedAt = now;
+        return MoveRejection.None;
     }
-
-    private static bool IsWalkable(World world, float x, float y) =>
-        TerrainGenerator.IsWalkable(world.TileAt((int)MathF.Floor(x), (int)MathF.Floor(y)));
 
     public bool IsWithinReach(int tileX, int tileY)
     {
-        float dx = tileX + 0.5f - X;
-        float dy = tileY + 0.5f - Y;
-        return dx * dx + dy * dy <= Tuning.ChopRangeTiles * Tuning.ChopRangeTiles;
+        double metres = TerrainGenerator.TileMetres;
+        // Horizontal distance only: standing on a ledge above a tree should
+        // still let you reach it, and height is already bounded by the
+        // movement rules.
+        var centre = new Vec3((tileX + 0.5) * metres, Position.Y, (tileY + 0.5) * metres);
+        return Position.HorizontalDistanceTo(centre) <= Tuning.ChopRangeMetres;
     }
 
-    /// <summary>Finds a walkable spawn point near the origin.</summary>
-    public static (float X, float Y) FindSpawn(World world)
+    public void ResetClock(double now) => LastAcceptedAt = now;
+
+    /// <summary>Finds a walkable spawn point near the origin, in metres.</summary>
+    public static Vec3 FindSpawn(World world, TerrainGenerator terrain)
     {
+        double metres = TerrainGenerator.TileMetres;
         for (int radius = 0; radius < 256; radius++)
         {
             for (int dy = -radius; dy <= radius; dy++)
@@ -77,11 +88,15 @@ public sealed class Player
                 for (int dx = -radius; dx <= radius; dx++)
                 {
                     if (Math.Abs(dx) != radius && Math.Abs(dy) != radius) continue;
-                    if (TerrainGenerator.IsWalkable(world.TileAt(dx, dy)))
-                        return (dx + 0.5f, dy + 0.5f);
+                    if (world.TileAt(dx, dy) is not (TileType.Grass or TileType.Sand)) continue;
+
+                    return new Vec3(
+                        (dx + 0.5) * metres,
+                        terrain.HeightAt(dx + 0.5, dy + 0.5),
+                        (dy + 0.5) * metres);
                 }
             }
         }
-        return (0.5f, 0.5f);
+        return Vec3.Zero;
     }
 }

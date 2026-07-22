@@ -52,7 +52,7 @@ public partial class DebugCapture : Node
 
             var at = OS.GetEnvironment("ASHFALL_CAPTURE_AT").Split(',');
             if (at.Length == 2 && float.TryParse(at[0], out var tx) && float.TryParse(at[1], out var ty))
-                camera.Position = new Vector2(tx, ty) * WorldView.TilePixels;
+                camera.Position = new Vector2(tx, ty);
         }
 
         // The viewport texture holds the frame that was already drawn, so new

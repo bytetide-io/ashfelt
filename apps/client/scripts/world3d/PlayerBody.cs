@@ -19,6 +19,17 @@ public partial class PlayerBody : CharacterBody3D
     [Export] public float TurnRate { get; set; } = 12.0f;
 
     private float _gravity = 24.0f;
+
+    /// <summary>Facing in radians, reported to the server for remote rendering.</summary>
+    public float Facing => _visual?.Rotation.Y ?? 0f;
+
+    /// <summary>Hard reset of position — used for server corrections and spawn.</summary>
+    public void Teleport(Vector3 position)
+    {
+        GlobalPosition = position;
+        Velocity = Vector3.Zero;
+    }
+
     private Node3D _cameraPivot = null!;
     private Node3D _visual = null!;
 

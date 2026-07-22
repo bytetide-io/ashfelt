@@ -9,8 +9,15 @@ public enum MessageId : byte
     // client -> server
     Hello = 1,
     RequestChunk = 2,
-    /// <summary>Player input. A request, never a state change — the server decides.</summary>
-    MoveIntent = 3,
+    /// <summary>
+    /// Reported position after client-side physics. The server validates it
+    /// against the shared height field and corrects when implausible.
+    ///
+    /// Position is the body *centre*, not the feet — remote clients render a
+    /// capsule at that point directly, so a feet-anchored value renders half
+    /// underground.
+    /// </summary>
+    ClientState = 3,
     /// <summary>Ask to harvest the tile at the given world coordinate.</summary>
     ChopRequest = 4,
 
@@ -24,12 +31,15 @@ public enum MessageId : byte
     TileChanged = 104,
     /// <summary>Authoritative inventory for the receiving player.</summary>
     InventoryUpdate = 105,
+
+    /// <summary>A reported position was rejected; snap back to this one.</summary>
+    Correction = 106,
 }
 
 public static class ProtocolVersion
 {
     /// <summary>Bumped whenever message layout changes. Mismatched peers are rejected.</summary>
-    public const int Current = 2;
+    public const int Current = 3;
 }
 
 /// <summary>Item kinds. Values are wire-stable — append only, never renumber.</summary>
@@ -45,11 +55,11 @@ public static class Tuning
     /// <summary>Server tick rate for simulation and state broadcast.</summary>
     public const int TicksPerSecond = 15;
 
-    /// <summary>Player movement speed, in tiles per second.</summary>
-    public const float MoveTilesPerSecond = 4.0f;
+    /// <summary>How often the client reports its position.</summary>
+    public const int ClientStateHz = 15;
 
-    /// <summary>How far a player may be from a tile to harvest it, in tiles.</summary>
-    public const float ChopRangeTiles = 2.0f;
+    /// <summary>How far a player may be from a tile to harvest it, in metres.</summary>
+    public const float ChopRangeMetres = 5.0f;
 
     /// <summary>Radius, in chunks, of the area a client is kept informed about.</summary>
     public const int InterestRadiusChunks = 1;
