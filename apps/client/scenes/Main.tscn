@@ -34,6 +34,21 @@ script = ExtResource("3_view")
 
 [node name="Hud" type="CanvasLayer" parent="."]
 
+[node name="Status" type="Label" parent="Hud"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -150.0
+offset_top = -20.0
+offset_right = 150.0
+offset_bottom = 20.0
+horizontal_alignment = 1
+vertical_alignment = 1
+autowrap_mode = 2
+text = "Connecting…"
+
 [node name="Inventory" type="Label" parent="Hud"]
 offset_left = 8.0
 offset_top = 6.0

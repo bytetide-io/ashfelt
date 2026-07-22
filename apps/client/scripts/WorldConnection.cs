@@ -28,6 +28,15 @@ public partial class WorldConnection : Node
     public event Action<int, int, TileType>? TileChanged;
     public event Action<IReadOnlyDictionary<ItemId, int>>? InventoryUpdated;
 
+    /// <summary>Human-readable link state, for the connecting/disconnected banner.</summary>
+    public event Action<string>? StatusChanged;
+
+    /// <summary>
+    /// Latest status. Nodes are readied depth-first, so this node connects
+    /// before Main can subscribe — the first status would otherwise be lost.
+    /// </summary>
+    public string Status { get; private set; } = "Connecting…";
+
     public bool IsLinked => _peer is { ConnectionState: ConnectionState.Connected };
 
     private NetManager? _net;
@@ -40,12 +49,18 @@ public partial class WorldConnection : Node
         listener.PeerConnectedEvent += OnConnected;
         listener.NetworkReceiveEvent += OnReceive;
         listener.PeerDisconnectedEvent += (_, info) =>
+        {
             GD.Print($"[client] disconnected: {info.Reason}");
+            SetStatus(info.Reason == DisconnectReason.ConnectionFailed
+                ? $"Cannot reach world-server at {Host}:{Port}.\nIs it running?  dotnet run --project apps/world-server"
+                : $"Disconnected: {info.Reason}");
+        };
 
         _net = new NetManager(listener) { UnsyncedEvents = false };
         _net.Start();
         _peer = _net.Connect(Host, Port, ConnectKey);
         GD.Print($"[client] connecting to {Host}:{Port}");
+        SetStatus($"Connecting to {Host}:{Port}…");
     }
 
     public override void _Process(double delta) => _net?.PollEvents();
@@ -83,6 +98,12 @@ public partial class WorldConnection : Node
         _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
     }
 
+    private void SetStatus(string status)
+    {
+        Status = status;
+        StatusChanged?.Invoke(status);
+    }
+
     private void OnConnected(NetPeer peer)
     {
         _writer.Reset();
@@ -104,6 +125,7 @@ public partial class WorldConnection : Node
                 int playerId = reader.GetInt();
                 float x = reader.GetFloat(), y = reader.GetFloat();
                 GD.Print($"[client] welcomed as player {playerId}, seed={seed}");
+                SetStatus("");
                 Welcomed?.Invoke(seed, chunkSize, playerId, x, y);
                 break;
             }

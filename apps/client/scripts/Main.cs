@@ -23,6 +23,7 @@ public partial class Main : Node2D
     private TouchInput _input = null!;
     private Camera2D _camera = null!;
     private Label _hud = null!;
+    private Label _status = null!;
 
     private int _playerId = -1;
     private Vector2 _predicted;
@@ -39,6 +40,7 @@ public partial class Main : Node2D
         _input = GetNode<TouchInput>("TouchInput");
         _camera = GetNode<Camera2D>("Camera2D");
         _hud = GetNode<Label>("Hud/Inventory");
+        _status = GetNode<Label>("Hud/Status");
 
         _connection.Welcomed += (seed, _, playerId, x, y) =>
             CallDeferred(nameof(OnWelcomed), seed, playerId, x, y);
@@ -49,6 +51,8 @@ public partial class Main : Node2D
         _connection.PlayersUpdated += OnPlayers;
         _connection.PlayerLeft += id => CallDeferred(nameof(OnPlayerLeft), id);
         _connection.InventoryUpdated += OnInventory;
+        _connection.StatusChanged += status => CallDeferred(nameof(ShowStatus), status);
+        ShowStatus(_connection.Status);
     }
 
     private void OnWelcomed(uint seed, int playerId, float x, float y)
@@ -85,6 +89,16 @@ public partial class Main : Node2D
         _inventory.Clear();
         foreach (var (item, amount) in inventory) _inventory[item] = amount;
         CallDeferred(nameof(RefreshHud));
+    }
+
+    /// <summary>
+    /// An empty world renders as a blank screen, which is indistinguishable
+    /// from a broken client. Say what is actually happening instead.
+    /// </summary>
+    private void ShowStatus(string status)
+    {
+        _status.Text = status;
+        _status.Visible = !string.IsNullOrEmpty(status);
     }
 
     private void RefreshHud()
