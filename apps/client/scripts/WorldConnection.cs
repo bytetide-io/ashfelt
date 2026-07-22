@@ -42,11 +42,16 @@ public partial class WorldConnection : Node
     /// </summary>
     public string Status { get; private set; } = "Connecting…";
 
+    /// <summary>Seconds between reconnection attempts.</summary>
+    [Export] public double RetryInterval { get; set; } = 3.0;
+
     public bool IsLinked => _peer is { ConnectionState: ConnectionState.Connected };
 
     private NetManager? _net;
     private NetPeer? _peer;
     private readonly NetDataWriter _writer = new();
+    private double _retryIn;
+    private int _attempts;
 
     public override void _Ready()
     {
@@ -57,18 +62,39 @@ public partial class WorldConnection : Node
         {
             GD.Print($"[client] disconnected: {info.Reason}");
             SetStatus(info.Reason == DisconnectReason.ConnectionFailed
-                ? $"Cannot reach world-server at {Host}:{Port}.\nIs it running?  dotnet run --project apps/world-server"
-                : $"Disconnected: {info.Reason}");
+                ? $"Waiting for world-server at {Host}:{Port}…\ndotnet run --project apps/world-server"
+                : $"Disconnected: {info.Reason}. Reconnecting…");
+            _retryIn = RetryInterval;
         };
 
         _net = new NetManager(listener);
         _net.Start();
-        _peer = _net.Connect(Host, Port, ConnectKey);
-        GD.Print($"[client] connecting to {Host}:{Port}");
+        Connect();
+    }
+
+    private void Connect()
+    {
+        _attempts++;
+        _peer = _net!.Connect(Host, Port, ConnectKey);
+        GD.Print($"[client] connecting to {Host}:{Port} (attempt {_attempts})");
         SetStatus($"Connecting to {Host}:{Port}…");
     }
 
-    public override void _Process(double delta) => _net?.PollEvents();
+    public override void _Process(double delta)
+    {
+        _net?.PollEvents();
+
+        // Keep retrying rather than stranding the player on an error screen:
+        // starting the world-server after the game is the normal dev order,
+        // and a dropped server should not cost a restart.
+        if (IsLinked || _net is null) return;
+
+        _retryIn -= delta;
+        if (_retryIn > 0) return;
+
+        _retryIn = RetryInterval;
+        if (_peer is null or { ConnectionState: ConnectionState.Disconnected }) Connect();
+    }
 
     public override void _ExitTree() => _net?.Stop();
 

@@ -28,8 +28,30 @@ public partial class DebugCapture : Node
         SetProcess(!string.IsNullOrEmpty(_path));
     }
 
+    private double _walked;
+    private bool _walkDone;
+
     public override void _Process(double delta)
     {
+        // ASHFALL_AUTOWALK drives the character from code, so movement and
+        // server validation can be verified without a human at the keyboard.
+        if (OS.HasEnvironment("ASHFALL_AUTOWALK") && !_walkDone)
+        {
+            var player = GetNodeOrNull<Node3D>("../Player");
+            if (player is not null)
+            {
+                if (_walked == 0) GD.Print($"[autowalk] start {player.GlobalPosition}");
+                _walked += delta;
+                Input.ActionPress("move_forward");
+                if (_walked > 3.0 && !_walkDone)
+                {
+                    _walkDone = true;
+                    Input.ActionRelease("move_forward");
+                    GD.Print($"[autowalk] end {player.GlobalPosition}");
+                }
+            }
+        }
+
         _remaining -= delta;
         if (_remaining > 0 || _capturing) return;
 

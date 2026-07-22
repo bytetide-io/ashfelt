@@ -44,11 +44,13 @@ public partial class PlayerBody : CharacterBody3D
         var velocity = Velocity;
 
         if (!IsOnFloor()) velocity.Y -= _gravity * (float)delta;
-        else if (Input.IsActionPressed("ui_accept")) velocity.Y = JumpSpeed;
+        else if (Input.IsActionPressed("jump")) velocity.Y = JumpSpeed;
 
         // Input is interpreted in the camera's frame, then flattened, so
         // looking up or down never changes how fast you walk.
-        var input = Input.GetVector("ui_left", "ui_right", "ui_up", "ui_down");
+        // Argument order is (negX, posX, negY, posY), so "forward" must be the
+        // positive Y action — otherwise W walks backwards.
+        var input = Input.GetVector("move_left", "move_right", "move_back", "move_forward");
         var basis = _cameraPivot.GlobalBasis;
         var forward = -basis.Z with { Y = 0 };
         var right = basis.X with { Y = 0 };
