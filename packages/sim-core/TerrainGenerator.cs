@@ -33,20 +33,56 @@ public sealed class TerrainGenerator
 
     private const uint TreeSalt = 0x7BEE7BEEu;
 
+    /// <summary>One tile is this many metres across in the rendered world.</summary>
+    public const double TileMetres = 2.0;
+
+    // Elevation thresholds. These classify the surface AND drive terrain
+    // height, so the two can never disagree — a Water tile is always below
+    // the shoreline, a Rock tile is always up a mountain.
+    private const double DeepWaterLevel = 0.32;
+    private const double ShoreLevel = 0.40;
+    private const double SandLevel = 0.44;
+    private const double RockLevel = 0.74;
+
+    /// <summary>Metres of relief per unit of elevation above the shoreline.</summary>
+    private const double LandRelief = 46.0;
+
+    /// <summary>Metres the seabed drops per unit of elevation below shore.</summary>
+    private const double SeabedRelief = 40.0;
+
     private readonly uint _seed;
 
     public TerrainGenerator(uint seed) => _seed = seed;
 
     public uint Seed => _seed;
 
+    /// <summary>
+    /// Raw elevation in [0,1]. Both the surface type and the terrain height
+    /// derive from this single value, which is what keeps them consistent.
+    /// </summary>
+    public double ElevationAt(double wx, double wy) =>
+        Noise.Fbm(wx, wy, _seed, octaves: 5, frequency: 1.0 / 64.0);
+
+    /// <summary>
+    /// Terrain height in metres, sampled continuously so it can be meshed.
+    /// Sea level is 0: land is positive, seabed negative.
+    /// </summary>
+    public double HeightAt(double wx, double wy)
+    {
+        double elevation = ElevationAt(wx, wy);
+        return elevation >= ShoreLevel
+            ? (elevation - ShoreLevel) * LandRelief
+            : (elevation - ShoreLevel) * SeabedRelief;
+    }
+
     /// <summary>Tile at absolute world tile coordinates.</summary>
     public TileType TileAt(int wx, int wy)
     {
-        double elevation = Noise.Fbm(wx, wy, _seed, octaves: 5, frequency: 1.0 / 64.0);
-        if (elevation < 0.32) return TileType.DeepWater;
-        if (elevation < 0.40) return TileType.Water;
-        if (elevation < 0.44) return TileType.Sand;
-        if (elevation > 0.74) return TileType.Rock;
+        double elevation = ElevationAt(wx, wy);
+        if (elevation < DeepWaterLevel) return TileType.DeepWater;
+        if (elevation < ShoreLevel) return TileType.Water;
+        if (elevation < SandLevel) return TileType.Sand;
+        if (elevation > RockLevel) return TileType.Rock;
 
         double moisture = Noise.Fbm(wx, wy, _seed ^ 0xA5A5A5A5u, octaves: 3, frequency: 1.0 / 40.0);
         if (moisture <= 0.55) return TileType.Grass;

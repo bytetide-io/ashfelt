@@ -15,6 +15,36 @@ mobile client ──auth──▶ gateway ──▶ postgres (accounts, characte
       └── postgres (world diffs, structures) ──┘
 ```
 
+## Projection: 3D
+
+The game is third-person 3D with physics-based movement. The client renders
+terrain as a mesh built from `sim-core` heights; the tile grid still exists
+underneath as the unit of world data (chunks, diffs, biomes, harvesting), but
+movement is no longer grid-constrained.
+
+`TerrainGenerator.HeightAt` is the bridge: one continuous elevation field
+drives both the surface classification and the mesh, so the two can never
+disagree. It is in `sim-core` precisely because the server will need identical
+heights for collision.
+
+**Open decision — server-authoritative physics.** Invariant 1 below says the
+server owns movement. With grid movement that was a tile lookup. With physics
+it means the server must simulate collision against the same terrain. The
+candidates:
+
+1. **Headless Godot world-server.** Server and client run the same physics
+   engine against the same mesh, so results agree by construction. Costs: the
+   world-server stops being a plain .NET service and gains an engine
+   dependency.
+2. **.NET server with a physics library** (BepuPhysics). Keeps the service
+   lean, but terrain collision must be rebuilt server-side and the two engines
+   will disagree at the margins.
+3. **Client-authoritative with server validation** — trust client positions,
+   reject implausible speed or teleports. Cheapest, and what several shipped
+   survival games do; weakest against cheating.
+
+Until this is decided, movement in the 3D client is **client-side only**.
+
 ## Invariants
 
 1. **Server-authoritative.** The client predicts movement for responsiveness.
