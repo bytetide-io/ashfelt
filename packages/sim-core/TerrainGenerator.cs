@@ -28,6 +28,11 @@ public sealed class TerrainGenerator
 {
     public const int ChunkSize = 32;
 
+    /// <summary>Share of the woodland band that is actually a tree.</summary>
+    private const int TreeDensityPercent = 34;
+
+    private const uint TreeSalt = 0x7BEE7BEEu;
+
     private readonly uint _seed;
 
     public TerrainGenerator(uint seed) => _seed = seed;
@@ -44,7 +49,14 @@ public sealed class TerrainGenerator
         if (elevation > 0.74) return TileType.Rock;
 
         double moisture = Noise.Fbm(wx, wy, _seed ^ 0xA5A5A5A5u, octaves: 3, frequency: 1.0 / 40.0);
-        return moisture > 0.55 ? TileType.Forest : TileType.Grass;
+        if (moisture <= 0.55) return TileType.Grass;
+
+        // A Forest tile is one tree, and trees block movement. Scattering them
+        // through the woodland band leaves clearings and paths, instead of a
+        // solid wall of trunks nobody can walk into.
+        return Noise.Hash(wx, wy, _seed ^ TreeSalt) % 100 < TreeDensityPercent
+            ? TileType.Forest
+            : TileType.Grass;
     }
 
     public Chunk Generate(ChunkCoord coord)
@@ -57,6 +69,10 @@ public sealed class TerrainGenerator
         return new Chunk(coord, tiles);
     }
 
+    /// <summary>
+    /// Forest and Rock block movement: they are trees and outcrops, drawn
+    /// standing up off the ground. Chop or mine them to open a path.
+    /// </summary>
     public static bool IsWalkable(TileType t) =>
-        t is TileType.Sand or TileType.Grass or TileType.Forest;
+        t is TileType.Sand or TileType.Grass;
 }

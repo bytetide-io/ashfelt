@@ -19,8 +19,7 @@ public partial class Main : Node2D
     private const float SnapDistanceTiles = 3f;
 
     private WorldConnection _connection = null!;
-    private ChunkRenderer _renderer = null!;
-    private PlayerRenderer _players = null!;
+    private WorldView _world = null!;
     private TouchInput _input = null!;
     private Camera2D _camera = null!;
     private Label _hud = null!;
@@ -36,13 +35,13 @@ public partial class Main : Node2D
     public override void _Ready()
     {
         _connection = GetNode<WorldConnection>("WorldConnection");
-        _renderer = GetNode<ChunkRenderer>("ChunkRenderer");
-        _players = GetNode<PlayerRenderer>("PlayerRenderer");
+        _world = GetNode<WorldView>("WorldView");
         _input = GetNode<TouchInput>("TouchInput");
         _camera = GetNode<Camera2D>("Camera2D");
         _hud = GetNode<Label>("Hud/Inventory");
 
-        _connection.Welcomed += (_, _, playerId, x, y) => CallDeferred(nameof(OnWelcomed), playerId, x, y);
+        _connection.Welcomed += (seed, _, playerId, x, y) =>
+            CallDeferred(nameof(OnWelcomed), seed, playerId, x, y);
         _connection.ChunkReceived += (coord, tiles) =>
             CallDeferred(nameof(OnChunk), coord.X, coord.Y, System.Array.ConvertAll(tiles, t => (byte)t));
         _connection.TileChanged += (x, y, tile) =>
@@ -52,24 +51,25 @@ public partial class Main : Node2D
         _connection.InventoryUpdated += OnInventory;
     }
 
-    private void OnWelcomed(int playerId, float x, float y)
+    private void OnWelcomed(uint seed, int playerId, float x, float y)
     {
         _playerId = playerId;
+        _world.Seed = seed;
         _predicted = _authoritative = new Vector2(x, y);
-        _players.LocalId = playerId;
+        _world.Entities.LocalId = playerId;
         _spawned = true;
         RequestChunksAround(_predicted);
     }
 
     private void OnChunk(int cx, int cy, byte[] tiles)
     {
-        _renderer.SetChunk(new ChunkCoord(cx, cy),
+        _world.SetChunk(new ChunkCoord(cx, cy),
             System.Array.ConvertAll(tiles, b => (TileType)b));
     }
 
-    private void OnTileChanged(int x, int y, byte tile) => _renderer.SetTile(x, y, (TileType)tile);
+    private void OnTileChanged(int x, int y, byte tile) => _world.SetTile(x, y, (TileType)tile);
 
-    private void OnPlayerLeft(int id) => _players.Remove(id);
+    private void OnPlayerLeft(int id) => _world.Entities.RemovePlayer(id);
 
     private void OnPlayers(IReadOnlyList<PlayerState> states)
     {
@@ -77,7 +77,7 @@ public partial class Main : Node2D
             if (state.Id == _playerId)
                 _authoritative = new Vector2(state.X, state.Y);
 
-        _players.ApplySnapshot(states);
+        _world.Entities.UpdatePlayers(states);
     }
 
     private void OnInventory(IReadOnlyDictionary<ItemId, int> inventory)
@@ -110,8 +110,8 @@ public partial class Main : Node2D
         Predict(direction, (float)delta);
         Reconcile((float)delta);
 
-        _players.LocalPosition = _predicted;
-        _camera.Position = _predicted * ChunkRenderer.TilePixels;
+        _world.Entities.SetLocalPosition(_predicted);
+        _camera.Position = _predicted * WorldView.TilePixels;
 
         if (_input.ConsumeTap() is { } tap) TryChopAt(tap);
 
@@ -143,7 +143,7 @@ public partial class Main : Node2D
 
     private bool IsWalkable(float x, float y)
     {
-        var tile = _renderer.TileAt(Mathf.FloorToInt(x), Mathf.FloorToInt(y));
+        var tile = _world.TileAt(Mathf.FloorToInt(x), Mathf.FloorToInt(y));
         // Unknown terrain is treated as walkable: the server will correct us
         // rather than the player being stuck at an unloaded chunk edge.
         return tile is null || TerrainGenerator.IsWalkable(tile.Value);
@@ -152,10 +152,10 @@ public partial class Main : Node2D
     private void TryChopAt(Vector2 screenPosition)
     {
         var world = _camera.GetCanvasTransform().AffineInverse() * screenPosition;
-        int tx = Mathf.FloorToInt(world.X / ChunkRenderer.TilePixels);
-        int ty = Mathf.FloorToInt(world.Y / ChunkRenderer.TilePixels);
+        int tx = Mathf.FloorToInt(world.X / WorldView.TilePixels);
+        int ty = Mathf.FloorToInt(world.Y / WorldView.TilePixels);
 
-        var tile = _renderer.TileAt(tx, ty);
+        var tile = _world.TileAt(tx, ty);
         if (tile is null || !HarvestRules.IsHarvestable(tile.Value)) return;
 
         // Range is enforced server-side; checking here avoids a pointless packet.
@@ -174,7 +174,7 @@ public partial class Main : Node2D
             for (int cx = centre.X - r; cx <= centre.X + r; cx++)
             {
                 var coord = new ChunkCoord(cx, cy);
-                if (_renderer.HasChunk(coord) || !_requested.Add(coord)) continue;
+                if (_world.HasChunk(coord) || !_requested.Add(coord)) continue;
                 _connection.RequestChunk(coord);
             }
         }

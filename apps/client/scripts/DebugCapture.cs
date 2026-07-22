@@ -6,6 +6,10 @@ namespace Ashfall.Client;
 /// Development aid: when ASHFALL_CAPTURE is set to a file path, saves one
 /// frame after a short delay and quits. Lets rendering be verified from a
 /// terminal, without a human watching the window. Inert otherwise.
+///
+/// ASHFALL_CAPTURE_AT="x,y" recentres the camera on those tile coordinates and
+/// ASHFALL_CAPTURE_ZOOM widens the shot, so a capture can frame a specific
+/// feature rather than wherever the player happens to be standing.
 /// </summary>
 public partial class DebugCapture : Node
 {
@@ -13,18 +17,47 @@ public partial class DebugCapture : Node
 
     private double _remaining;
     private string _path = "";
+    private bool _capturing;
 
     public override void _Ready()
     {
         _path = OS.GetEnvironment("ASHFALL_CAPTURE");
         _remaining = DelaySeconds;
+        // Keep running once the tree is paused, so the capture can finish.
+        ProcessMode = ProcessModeEnum.Always;
         SetProcess(!string.IsNullOrEmpty(_path));
     }
 
     public override void _Process(double delta)
     {
         _remaining -= delta;
-        if (_remaining > 0) return;
+        if (_remaining > 0 || _capturing) return;
+
+        _capturing = true;
+        Capture();
+    }
+
+    private async void Capture()
+    {
+        // Pausing first stops Main writing the camera position back on the
+        // next tick, which would undo the framing below.
+        GetTree().Paused = true;
+
+        var camera = GetViewport().GetCamera2D();
+        if (camera is not null)
+        {
+            var zoom = OS.GetEnvironment("ASHFALL_CAPTURE_ZOOM");
+            if (!string.IsNullOrEmpty(zoom) && float.TryParse(zoom, out var z))
+                camera.Zoom = new Vector2(z, z);
+
+            var at = OS.GetEnvironment("ASHFALL_CAPTURE_AT").Split(',');
+            if (at.Length == 2 && float.TryParse(at[0], out var tx) && float.TryParse(at[1], out var ty))
+                camera.Position = new Vector2(tx, ty) * WorldView.TilePixels;
+        }
+
+        // The viewport texture holds the frame that was already drawn, so new
+        // framing only appears once the next one has completed.
+        await ToSignal(RenderingServer.Singleton, RenderingServer.SignalName.FramePostDraw);
 
         var viewport = GetViewport();
         viewport.GetTexture().GetImage().SavePng(_path);
