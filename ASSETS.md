@@ -18,15 +18,21 @@ godot --headless --import --path apps/client
 ```
 
 Godot ships as an app bundle with no command-line entry, so `godot` only
-exists if you put it on your PATH:
+exists if you put it on your PATH. Use a wrapper script, **not a symlink**:
 
 ```bash
-ln -sf /path/to/Godot_mono.app/Contents/MacOS/Godot ~/.local/bin/godot
+cat > ~/.local/bin/godot <<'EOF'
+#!/bin/sh
+exec "/path/to/Godot_mono.app/Contents/MacOS/Godot" "$@"
+EOF
+chmod +x ~/.local/bin/godot
 ```
 
-The import step prints `.NET: Assemblies not found`. That is the headless
-editor noting it has no built C# assembly; texture import does not need one
-and completes normally.
+A symlink breaks C# entirely. Godot locates its bundled GodotSharp assemblies
+relative to its own executable path, so through a symlink it searches the
+symlink's directory, finds nothing, and fails with `.NET: Assemblies not
+found` — scripts then refuse to load. `exec` from a wrapper keeps the real
+path intact.
 
 | File | Size | Purpose |
 |---|---|---|
