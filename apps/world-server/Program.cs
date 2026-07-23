@@ -18,6 +18,22 @@ int restored = await store.LoadDiffsAsync(world);
 int structures = await store.LoadStructuresAsync(world);
 Console.WriteLine($"[world] seed={seed} restored {restored} diff(s), {structures} structure(s)");
 
+// Build sites (committed blueprints) are player-caused state, replayed like
+// diffs and structures. The highest stored id fixes where new ids resume so a
+// client never sees an id reused across a restart.
+var buildSites = new Dictionary<long, BuildSite>();
+long nextSiteId = 1;
+foreach (var loadedSite in await store.LoadBuildSitesAsync())
+{
+    buildSites[loadedSite.Id] = loadedSite;
+    if (loadedSite.Id >= nextSiteId) nextSiteId = loadedSite.Id + 1;
+}
+Console.WriteLine($"[world] restored {buildSites.Count} build site(s)");
+
+// Reads live terrain, structures and built walls to bound where a player may
+// move — the authority behind the client's own collision.
+var obstacles = new WorldObstacles(world, buildSites);
+
 var players = new Dictionary<NetPeer, Player>();
 var writer = new NetDataWriter();
 int nextPlayerId = 1;
@@ -148,6 +164,26 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                 WriteStructurePlaced(writer, structure);
                 peer.Send(writer, DeliveryMethod.ReliableOrdered);
             }
+
+            // Backfill build sites: everyone sees the *built* pieces of every site
+            // (public world state), but only the owner receives the full blueprint
+            // — its pending hologram and its stockpile are private to them.
+            foreach (var site in buildSites.Values)
+            {
+                if (site.Owner == player.CharacterId)
+                {
+                    SendBlueprintState(player, site);
+                }
+                else
+                {
+                    foreach (var piece in site.BuiltPieces)
+                    {
+                        writer.Reset();
+                        WriteBuiltPiece(writer, site.Id, piece);
+                        peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                    }
+                }
+            }
             break;
         }
 
@@ -175,7 +211,7 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
             // The client simulates physics; the server decides whether the
             // result was possible. Anything else is taken on trust nowhere.
-            var rejection = player.TryAccept(world.Terrain, reported, yaw, Now());
+            var rejection = player.TryAccept(world.Terrain, reported, yaw, Now(), obstacles);
             if (rejection == MoveRejection.None) break;
 
             Console.WriteLine($"[world] player {player.Id} move rejected: {rejection}");
@@ -297,6 +333,124 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             break;
         }
 
+        case MessageId.CommitBlueprint:
+        {
+            int count = reader.GetUShort();
+            var pieces = new List<PlannedPiece>(count);
+            for (int i = 0; i < count; i++)
+            {
+                var kind = (BuildPieceKind)reader.GetByte();
+                var material = (BuildMaterial)reader.GetByte();
+                int px = reader.GetInt(), py = reader.GetInt(), level = reader.GetInt();
+                var layer = (PieceLayer)reader.GetByte();
+                pieces.Add(new PlannedPiece(kind, material, PieceSlot.Canonical(px, py, level, layer)));
+            }
+            if (pieces.Count == 0) break;
+
+            // The client predicts validity, but the server is the authority: an
+            // illegal plan (unsupported piece, bad layer, aliased slot, off
+            // buildable ground) is refused outright rather than half-built.
+            var validation = BuildingRules.Validate(pieces, GroundBuildable);
+            if (!validation.Ok)
+            {
+                Console.WriteLine($"[world] player {player.Id} committed an invalid blueprint " +
+                                  $"({validation.Problems.Count} problem(s))");
+                break;
+            }
+
+            var site = new BuildSite(nextSiteId++, player.CharacterId, pieces);
+            buildSites[site.Id] = site;
+            _ = store.SaveBlueprintAsync(site);
+
+            SendBlueprintState(player, site);
+            Console.WriteLine($"[world] player {player.Id} committed blueprint {site.Id} ({site.PieceCount} pieces)");
+            break;
+        }
+
+        case MessageId.DepositRequest:
+        {
+            long siteId = reader.GetLong();
+            var item = (ItemId)reader.GetByte();
+            int amount = reader.GetInt();
+
+            if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
+
+            // Take only what the site needs and only what the player holds; the
+            // site refuses the rest, so nothing is lost from the player's stack.
+            int held = player.Inventory.GetValueOrDefault(item);
+            int taken = site.Deposit(item, Math.Min(amount, held));
+            if (taken <= 0) break;
+
+            player.Take(item, taken);
+            _ = store.SaveStorageAsync(siteId, item, site.Storage.GetValueOrDefault(item));
+            SendBlueprintState(player, site);
+            Console.WriteLine($"[world] player {player.Id} deposited {taken} {item} into site {siteId}");
+            break;
+        }
+
+        case MessageId.BuildRequest:
+        {
+            long siteId = reader.GetLong();
+            if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
+
+            var next = site.PeekNextBuildable(GroundBuildable);
+            if (next is not { } target) break;
+            if (!player.IsWithinReach(target.Slot.X, target.Slot.Y))
+            {
+                Console.WriteLine($"[world] player {player.Id} build out of range at ({target.Slot.X},{target.Slot.Y})");
+                break;
+            }
+
+            var strike = site.TryBuildAt(target.Slot, GroundBuildable);
+            if (!strike.Acted) break;
+
+            if (strike.Completed)
+            {
+                _ = store.SavePieceBuiltAsync(siteId, target.Slot);
+                // Materials were consumed on the completing strike: persist the
+                // stockpile lines the piece drew from.
+                if (StructureCatalog.TryGet(target.Kind, target.Material, out var def))
+                    foreach (var line in def.Cost)
+                        _ = store.SaveStorageAsync(siteId, line.Item, site.Storage.GetValueOrDefault(line.Item));
+
+                // A completed piece is public: everyone sees it appear.
+                writer.Reset();
+                WriteBuildProgress(writer, siteId, strike);
+                Broadcast(writer);
+                SendBlueprintState(player, site);
+                Console.WriteLine($"[world] player {player.Id} built {target.Kind} on site {siteId}" +
+                                  (site.IsComplete ? " (complete)" : ""));
+            }
+            else
+            {
+                // A partial strike wears an unbuilt piece up — private to the owner,
+                // since only they can see the pending hologram.
+                writer.Reset();
+                WriteBuildProgress(writer, siteId, strike);
+                player.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
+            }
+            break;
+        }
+
+        case MessageId.CancelBlueprint:
+        {
+            long siteId = reader.GetLong();
+            if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
+
+            // Tear it down: the stockpile returns to the owner, and every piece —
+            // built or pending — is removed from the shared world.
+            foreach (var (item, amount) in site.Storage) player.Give(item, amount);
+            buildSites.Remove(siteId);
+            _ = store.DeleteBlueprintAsync(siteId);
+
+            writer.Reset();
+            writer.Put((byte)MessageId.BuildSiteRemoved);
+            writer.Put(siteId);
+            Broadcast(writer);
+            Console.WriteLine($"[world] player {player.Id} cancelled site {siteId}");
+            break;
+        }
+
         case MessageId.RequestRelease:
         {
             string targetWorldId = reader.GetString();
@@ -385,7 +539,9 @@ while (!shutdown.IsSet)
     bool daytime = WorldClock.IsDaytime(WorldClock.TimeOfDay(tick));
     foreach (var player in players.Values)
     {
-        bool warm = daytime || world.HasWarmthNear(player.Position);
+        // Warm in daylight, by a lit campfire, or under the roof of a built
+        // shelter — so raising a roof is a real answer to the night, not decor.
+        bool warm = daytime || world.HasWarmthNear(player.Position) || ShelteredAt(player.Position);
         player.AdvanceSurvival(1, warm);
     }
 
@@ -465,4 +621,81 @@ static void WriteStructurePlaced(NetDataWriter data, Structure structure)
     data.Put((byte)structure.Kind);
     data.Put(structure.TileX);
     data.Put(structure.TileY);
+}
+
+// Whether the terrain under a cell can carry a foundation — the same walkability
+// gate the legacy placement path uses, so a building rests where a wall could.
+bool GroundBuildable(int x, int y) => TerrainGenerator.IsWalkable(world.TileAt(x, y));
+
+// Whether a built roof shelters the player's cell — the survival payoff of
+// finishing a building, checked each tick alongside the campfire warmth radius.
+bool ShelteredAt(Vec3 position)
+{
+    double metres = TerrainGenerator.TileMetres;
+    int cellX = (int)Math.Floor(position.X / metres);
+    int cellY = (int)Math.Floor(position.Z / metres);
+    foreach (var site in buildSites.Values)
+        if (site.HasBuiltRoofOver(cellX, cellY)) return true;
+    return false;
+}
+
+// The whole of one build site, sent only to its owner: the pending hologram, the
+// built pieces, and the on-site stockpile. The client rebuilds its private view
+// from this, so it is authoritative and idempotent.
+void SendBlueprintState(Player owner, BuildSite site)
+{
+    writer.Reset();
+    writer.Put((byte)MessageId.BlueprintState);
+    writer.Put(site.Id);
+    writer.Put((ushort)site.PieceCount);
+    foreach (var piece in site.Pieces)
+    {
+        writer.Put((byte)piece.Kind);
+        writer.Put((byte)piece.Material);
+        writer.Put(piece.Slot.X);
+        writer.Put(piece.Slot.Y);
+        writer.Put(piece.Slot.Level);
+        writer.Put((byte)piece.Slot.Layer);
+        writer.Put((byte)(site.IsBuilt(piece.Slot) ? 1 : 0));
+    }
+    writer.Put((byte)site.Storage.Count);
+    foreach (var (item, amount) in site.Storage)
+    {
+        writer.Put((byte)item);
+        writer.Put(amount);
+    }
+    owner.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
+}
+
+static void WriteBuildProgress(NetDataWriter data, long siteId, BuildSite.BuildStrike strike)
+{
+    data.Put((byte)MessageId.BuildProgress);
+    data.Put(siteId);
+    data.Put((byte)strike.Piece.Kind);
+    data.Put((byte)strike.Piece.Material);
+    data.Put(strike.Piece.Slot.X);
+    data.Put(strike.Piece.Slot.Y);
+    data.Put(strike.Piece.Slot.Level);
+    data.Put((byte)strike.Piece.Slot.Layer);
+    data.Put((byte)strike.StrikesLeft);
+    data.Put((byte)strike.StrikesTotal);
+    data.Put((byte)(strike.Completed ? 1 : 0));
+}
+
+// A built piece as a completed-strike message, for backfilling a joining player
+// who is not the owner: they learn only of pieces that already stand.
+static void WriteBuiltPiece(NetDataWriter data, long siteId, PlannedPiece piece)
+{
+    int total = BuildingRules.HitsToBuild(piece.Kind, piece.Material);
+    data.Put((byte)MessageId.BuildProgress);
+    data.Put(siteId);
+    data.Put((byte)piece.Kind);
+    data.Put((byte)piece.Material);
+    data.Put(piece.Slot.X);
+    data.Put(piece.Slot.Y);
+    data.Put(piece.Slot.Level);
+    data.Put((byte)piece.Slot.Layer);
+    data.Put((byte)0);
+    data.Put((byte)total);
+    data.Put((byte)1);
 }

@@ -87,6 +87,41 @@ public partial class World3D : Node3D
     private readonly Dictionary<long, Node3D> _structures = new();
     private Node3D _structureRoot = null!;
 
+    private BlueprintView _blueprints = null!;
+    private ArchitectController _architect = null!;
+    private ArchitectCamera _architectCamera = null!;
+    private Camera3D _orbitCamera = null!;
+    private bool _buildMode;
+    private Node3D? _cursorGhost;
+    private PieceSlot _cursorSlot;
+    private BuildPieceKind _cursorKind;
+    private BuildMaterial _cursorMaterial;
+
+    /// <summary>The player's latest inventory, mirrored here so a deposit knows how
+    /// much of each material to offer a build site.</summary>
+    private IReadOnlyDictionary<ItemId, int> _inventory = new Dictionary<ItemId, int>();
+
+    /// <summary>Owned build sites the player can supply and raise, keyed by server id.
+    /// A representative cell measures reach; the needed items bound a "deposit all".</summary>
+    private sealed class OwnedSite
+    {
+        public int CellX;
+        public int CellY;
+        public readonly HashSet<ItemId> Needs = new();
+    }
+
+    private readonly Dictionary<long, OwnedSite> _ownedSites = new();
+    private long _activeSite = -1;
+
+    /// <summary>One static body carries every tree's collider as a child shape,
+    /// keyed by tile so a felled tree's shape is removed when its foliage collapses.
+    /// A single body rather than one-per-tree keeps the physics broadphase cheap —
+    /// this is a mobile-only game with a tight CPU budget. Matches the server, which
+    /// stops a player from entering a Forest tile.</summary>
+    private StaticBody3D _obstacleBody = null!;
+    private readonly Dictionary<(int, int), CollisionShape3D> _obstacleColliders = new();
+    private const float TreeColliderHeight = 3.0f;
+
     private WorldConnection _connection = null!;
     private PlayerBody _player = null!;
     private Label _status = null!;
@@ -115,6 +150,9 @@ public partial class World3D : Node3D
         _hud = GetNode<SurvivalHud>(HudPath);
         _sun = GetNode<DirectionalLight3D>("Sun");
         _environment = GetNode<WorldEnvironment>("WorldEnvironment");
+        _orbitCamera = GetNode<Camera3D>("CameraRig/SpringArm3D/Camera3D");
+        _architectCamera = new ArchitectCamera { Name = "ArchitectCamera" };
+        AddChild(_architectCamera);
         // The CRT grade sits over the world but under the HUD's own CanvasLayer,
         // so scanlines never dim the interface.
         _crt = new CrtOverlay();
@@ -141,6 +179,32 @@ public partial class World3D : Node3D
             CallDeferred(nameof(OnTileChanged), tx, ty, (int)tile);
         _connection.HarvestProgress += (tx, ty, left, total) =>
             CallDeferred(nameof(OnHarvestProgress), tx, ty, left, total);
+        _connection.InventoryUpdated += inventory => _inventory = inventory;
+
+        // Blueprint events flow through the world so a single subscription survives
+        // world rebuilds: the connection outlives a voyage, the renderer does not.
+        _connection.BlueprintReceived += (siteId, pieces, _) =>
+        {
+            _blueprints?.QueueBlueprint(siteId, pieces);
+            TrackOwnedSite(siteId, pieces);
+        };
+        _connection.BuildProgressed += (siteId, piece, _, _, completed) =>
+            _blueprints?.QueueProgress(siteId, piece, completed);
+        _connection.BuildSiteRemoved += siteId =>
+        {
+            _blueprints?.QueueRemove(siteId);
+            _ownedSites.Remove(siteId);
+        };
+
+        _hud.ArchitectToggled += () => SetBuildMode(!_buildMode);
+        _hud.ArchitectSelectKind += kind => _architect?.SelectKind(kind);
+        _hud.ArchitectSelectMaterial += material => _architect?.SelectMaterial(material);
+        _hud.ArchitectUndo += () => _architect?.Undo();
+        _hud.ArchitectCommit += CommitBlueprint;
+        _hud.ArchitectExit += () => SetBuildMode(false);
+        _hud.BuildHerePressed += () => { if (_activeSite >= 0) _connection.SendBuild(_activeSite); };
+        _hud.DepositPressed += DepositAtActiveSite;
+
         ShowStatus(_connection.Status);
     }
 
@@ -195,6 +259,12 @@ public partial class World3D : Node3D
         _tileDiffs.Clear();
         _structures.Clear();
         _remotes.Clear();
+
+        _ownedSites.Clear();
+        _activeSite = -1;
+        _obstacleColliders.Clear(); // freed with _worldRoot
+        _cursorGhost = null; // freed with _worldRoot
+        if (_buildMode) SetBuildMode(false);
     }
 
     /// <summary>Realign the local clock to the server's authoritative time-of-day.</summary>
@@ -282,6 +352,15 @@ public partial class World3D : Node3D
         _structureRoot = new Node3D { Name = "Structures" };
         _worldRoot.AddChild(_structureRoot);
 
+        _blueprints = new BlueprintView { Name = "Blueprints" };
+        _worldRoot.AddChild(_blueprints);
+        _blueprints.Bind(_terrain);
+
+        _architect = new ArchitectController { Name = "Architect" };
+        _worldRoot.AddChild(_architect);
+        _architect.Bind(_terrain, (x, y) => TerrainGenerator.IsWalkable(EffectiveTile(x, y)));
+        _architect.Changed += RefreshArchitectHud;
+
         var trunks = new List<Transform3D>();
         var canopies = new List<Transform3D>();
         var treeTiles = new List<(int, int)>();
@@ -327,6 +406,13 @@ public partial class World3D : Node3D
             RegisterFoliage(treeTiles[i], canopyFoliage.Multimesh, i);
             _treeBase[treeTiles[i]] = treeBases[i];
         }
+
+        // A tree is solid: give every Forest tile a full-tile collider so the
+        // player stops at it, matching the server's Forest-tile block. All the
+        // colliders hang off one static body to keep the broadphase cheap.
+        _obstacleBody = new StaticBody3D { Name = "Obstacles" };
+        _worldRoot.AddChild(_obstacleBody);
+        foreach (var tile in treeTiles) AddTreeCollider(tile);
 
         var tuftFoliage = BuildFoliage(tufts, new SphereMesh
         {
@@ -484,6 +570,22 @@ public partial class World3D : Node3D
         refs.Add(new FoliageRef(mesh, index, mesh.GetInstanceTransform(index)));
     }
 
+    private void AddTreeCollider((int X, int Y) tile)
+    {
+        double metres = TerrainGenerator.TileMetres;
+        float baseY = (float)_terrain.HeightAt(tile.X + 0.5, tile.Y + 0.5);
+        var shape = new CollisionShape3D
+        {
+            Shape = new BoxShape3D { Size = new Vector3((float)metres, TreeColliderHeight, (float)metres) },
+            Position = new Vector3(
+                (float)((tile.X + 0.5) * metres),
+                baseY + TreeColliderHeight * 0.5f,
+                (float)((tile.Y + 0.5) * metres)),
+        };
+        _obstacleBody.AddChild(shape);
+        _obstacleColliders[tile] = shape;
+    }
+
     /// <summary>A press that travels less than this before release is a tap
     /// (harvest); anything further is a camera drag and is left to OrbitCamera.</summary>
     private const float TapMaxTravelPixels = 12f;
@@ -532,14 +634,150 @@ public partial class World3D : Node3D
 
     public override void _PhysicsProcess(double delta)
     {
-        UpdateGatherPrompt();
+        if (_buildMode)
+        {
+            UpdateBuildCursor();
+        }
+        else if (_built)
+        {
+            UpdateGatherPrompt();
+            UpdateSiteProximity();
+        }
 
         if (!_harvestQueued) return;
         _harvestQueued = false;
 
-        // Input is a request, never a state change: the tile does not change here.
-        // The server's TileChanged / HarvestProgress is what wears down the node.
-        if (_gatherTarget is { } target) _connection.SendChop(target.X, target.Y);
+        // Input is a request, never a state change. In build mode a tap lays a
+        // ghost into the private draft; otherwise it asks the server to harvest.
+        if (_buildMode) PlaceCursorPiece();
+        else if (_gatherTarget is { } target) _connection.SendChop(target.X, target.Y);
+    }
+
+    // ---- Architect mode ------------------------------------------------
+
+    /// <summary>
+    /// Shows a translucent cursor of the current piece under the camera reticle, so
+    /// the player sees exactly what a tap will place. Rebuilt only when the slot,
+    /// kind or material changes, so it is not remeshed every frame.
+    /// </summary>
+    private void UpdateBuildCursor()
+    {
+        var (cx, cy) = _architectCamera.FocusCell();
+        var slot = _architect.SlotFor(cx, cy, _architectCamera.Focus);
+        if (_cursorGhost is not null && slot.Equals(_cursorSlot)
+            && _cursorKind == _architect.Kind && _cursorMaterial == _architect.Material)
+            return;
+
+        _cursorGhost?.QueueFree();
+        _cursorSlot = slot;
+        _cursorKind = _architect.Kind;
+        _cursorMaterial = _architect.Material;
+        var piece = new PlannedPiece(_architect.Kind, _architect.Material, slot);
+        _cursorGhost = BlueprintPieces3D.Build(piece, _terrain, ghost: true);
+        _worldRoot.AddChild(_cursorGhost);
+    }
+
+    private void PlaceCursorPiece()
+    {
+        var (cx, cy) = _architectCamera.FocusCell();
+        _architect.Toggle(_architect.SlotFor(cx, cy, _architectCamera.Focus));
+    }
+
+    /// <summary>
+    /// Enter or leave the private architect view. Entering hands the view to the
+    /// free-pan camera and freezes the character so designing is not walking;
+    /// leaving restores the third-person orbit and the player.
+    /// </summary>
+    private void SetBuildMode(bool on)
+    {
+        _buildMode = on;
+        _hud.SetBuildMode(on);
+        if (on)
+        {
+            _architectCamera.Activate(_player.GlobalPosition + Vector3.Up * 0.5f);
+            _player.ProcessMode = ProcessModeEnum.Disabled;
+            RefreshArchitectHud();
+        }
+        else
+        {
+            _architectCamera.Deactivate();
+            _orbitCamera.Current = true;
+            _player.ProcessMode = ProcessModeEnum.Inherit;
+            _cursorGhost?.QueueFree();
+            _cursorGhost = null;
+            _cursorKind = default;
+            _architect?.Clear();
+        }
+    }
+
+    private void RefreshArchitectHud()
+    {
+        if (_architect is null) return;
+        _hud.UpdateArchitect(
+            _architect.Kind, _architect.Material, _architect.BillOfMaterials(), _architect.Validation().Ok);
+    }
+
+    private void CommitBlueprint()
+    {
+        var pieces = _architect.Commit();
+        if (pieces.Count == 0) return;
+        _connection.SendCommitBlueprint(pieces);
+        SetBuildMode(false);
+    }
+
+    /// <summary>Tracks the nearest owned site in reach so its build actions surface.</summary>
+    private void UpdateSiteProximity()
+    {
+        _activeSite = -1;
+        if (_ownedSites.Count == 0) { _hud.ShowSiteActions(false); return; }
+
+        float metres = (float)TerrainGenerator.TileMetres;
+        float range = (float)Proto.Tuning.ChopRangeMetres;
+        Vector3 p = _player.GlobalPosition;
+        float bestSq = range * range;
+
+        foreach (var (id, site) in _ownedSites)
+        {
+            float cx = (site.CellX + 0.5f) * metres;
+            float cz = (site.CellY + 0.5f) * metres;
+            float distSq = (p.X - cx) * (p.X - cx) + (p.Z - cz) * (p.Z - cz);
+            if (distSq > bestSq) continue;
+            bestSq = distSq;
+            _activeSite = id;
+        }
+        _hud.ShowSiteActions(_activeSite >= 0);
+    }
+
+    private void DepositAtActiveSite()
+    {
+        if (_activeSite < 0 || !_ownedSites.TryGetValue(_activeSite, out var site)) return;
+        foreach (var item in site.Needs)
+        {
+            int have = _inventory.GetValueOrDefault(item);
+            if (have > 0) _connection.SendDeposit(_activeSite, item, have);
+        }
+    }
+
+    /// <summary>Records an owned site's reach cell and the materials it consumes, from
+    /// the authoritative blueprint the server just sent.</summary>
+    private void TrackOwnedSite(long siteId, IReadOnlyList<BlueprintPieceView> pieces)
+    {
+        var site = new OwnedSite { CellX = 0, CellY = 0 };
+        var planned = new List<PlannedPiece>(pieces.Count);
+        bool first = true;
+        foreach (var view in pieces)
+        {
+            planned.Add(view.Piece);
+            var slot = view.Piece.Slot;
+            if (first || slot.X < site.CellX || (slot.X == site.CellX && slot.Y < site.CellY))
+            {
+                site.CellX = slot.X;
+                site.CellY = slot.Y;
+                first = false;
+            }
+        }
+        foreach (var line in BuildingRules.BillOfMaterials(planned)) site.Needs.Add(line.Item);
+        _ownedSites[siteId] = site;
     }
 
     /// <summary>
@@ -614,6 +852,9 @@ public partial class World3D : Node3D
         // Record the diff so the reticle and tap stop treating this tile as the
         // node it used to be — the fix for re-tapping a felled stump forever.
         _tileDiffs[key] = (TileType)tile;
+
+        // A felled node stops blocking: drop its collider as its foliage collapses.
+        if (_obstacleColliders.Remove((tileX, tileY), out var collider)) collider.QueueFree();
 
         if (_treeBase.ContainsKey(key) && EnsureTreeFall(key) is { } fall)
         {
@@ -775,12 +1016,25 @@ public partial class World3D : Node3D
         _ => BuildWall(),
     };
 
-    private static MeshInstance3D BuildWall() => new()
+    private static Node3D BuildWall()
     {
-        Mesh = new BoxMesh { Size = new Vector3((float)TerrainGenerator.TileMetres, 2.4f, 0.4f) },
-        Position = Vector3.Up * 1.2f,
-        MaterialOverride = FlatMaterial(WallColour),
-    };
+        float metres = (float)TerrainGenerator.TileMetres;
+        var body = new StaticBody3D();
+        body.AddChild(new MeshInstance3D
+        {
+            Mesh = new BoxMesh { Size = new Vector3(metres, 2.4f, 0.4f) },
+            Position = Vector3.Up * 1.2f,
+            MaterialOverride = FlatMaterial(WallColour),
+        });
+        // A placed wall blocks its whole tile on the server; match that with a
+        // full-tile collider so the player is stopped consistently.
+        body.AddChild(new CollisionShape3D
+        {
+            Shape = new BoxShape3D { Size = new Vector3(metres, 2.4f, metres) },
+            Position = Vector3.Up * 1.2f,
+        });
+        return body;
+    }
 
     private static Node3D BuildCampfire()
     {

@@ -10,6 +10,9 @@ namespace Ashfall.Client;
 
 public readonly record struct PlayerState(int Id, Vector3 Position, float Yaw);
 
+/// <summary>One piece of a build site as the owner sees it: the plan plus whether it stands yet.</summary>
+public readonly record struct BlueprintPieceView(PlannedPiece Piece, bool Built);
+
 /// <summary>
 /// UDP link to a single world-server.
 ///
@@ -40,6 +43,21 @@ public partial class WorldConnection : Node
 
     /// <summary>(structure id, kind, tileX, tileY) — a structure to render.</summary>
     public event Action<long, ItemId, int, int>? StructurePlaced;
+
+    /// <summary>
+    /// (siteId, pieces, storage) — the owner's full private view of a build site:
+    /// every piece with its built flag, plus the on-site stockpile.
+    /// </summary>
+    public event Action<long, IReadOnlyList<BlueprintPieceView>, IReadOnlyDictionary<ItemId, int>>? BlueprintReceived;
+
+    /// <summary>
+    /// (siteId, piece, strikesLeft, strikesTotal, completed) — one construction
+    /// strike. A completed strike reaches everyone; a partial one only the owner.
+    /// </summary>
+    public event Action<long, PlannedPiece, int, int, bool>? BuildProgressed;
+
+    /// <summary>(siteId) — a build site was torn down; drop all its pieces.</summary>
+    public event Action<long>? BuildSiteRemoved;
 
     /// <summary>(hunger, stamina, health, warmth) in display points, plus time-of-day in [0,1).</summary>
     public event Action<int, int, int, int, float>? StatsUpdated;
@@ -188,6 +206,60 @@ public partial class WorldConnection : Node
         _writer.Put((byte)kind);
         _writer.Put(tileX);
         _writer.Put(tileY);
+        _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
+    }
+
+    /// <summary>
+    /// Commit a designed blueprint. The pieces carry canonical slots already;
+    /// the server re-canonicalises and validates before creating the site.
+    /// </summary>
+    public void SendCommitBlueprint(IReadOnlyList<PlannedPiece> pieces)
+    {
+        if (!IsLinked || pieces.Count == 0) return;
+        _writer.Reset();
+        _writer.Put((byte)MessageId.CommitBlueprint);
+        _writer.Put((ushort)pieces.Count);
+        foreach (var piece in pieces)
+        {
+            _writer.Put((byte)piece.Kind);
+            _writer.Put((byte)piece.Material);
+            _writer.Put(piece.Slot.X);
+            _writer.Put(piece.Slot.Y);
+            _writer.Put(piece.Slot.Level);
+            _writer.Put((byte)piece.Slot.Layer);
+        }
+        _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
+    }
+
+    /// <summary>Deposit materials from inventory into a build site's on-site storage.</summary>
+    public void SendDeposit(long siteId, ItemId item, int amount)
+    {
+        if (!IsLinked || amount <= 0) return;
+        _writer.Reset();
+        _writer.Put((byte)MessageId.DepositRequest);
+        _writer.Put(siteId);
+        _writer.Put((byte)item);
+        _writer.Put(amount);
+        _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
+    }
+
+    /// <summary>Strike the next buildable piece at a build site the player is standing at.</summary>
+    public void SendBuild(long siteId)
+    {
+        if (!IsLinked) return;
+        _writer.Reset();
+        _writer.Put((byte)MessageId.BuildRequest);
+        _writer.Put(siteId);
+        _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
+    }
+
+    /// <summary>Tear down a build site, refunding its stockpile to the owner.</summary>
+    public void SendCancelBlueprint(long siteId)
+    {
+        if (!IsLinked) return;
+        _writer.Reset();
+        _writer.Put((byte)MessageId.CancelBlueprint);
+        _writer.Put(siteId);
         _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
     }
 
@@ -390,6 +462,47 @@ public partial class WorldConnection : Node
                 StructurePlaced?.Invoke(structureId, kind, tx, ty);
                 break;
             }
+
+            case MessageId.BlueprintState:
+            {
+                long siteId = reader.GetLong();
+                int count = reader.GetUShort();
+                var pieces = new List<BlueprintPieceView>(count);
+                for (int i = 0; i < count; i++)
+                {
+                    var kind = (BuildPieceKind)reader.GetByte();
+                    var material = (BuildMaterial)reader.GetByte();
+                    int x = reader.GetInt(), y = reader.GetInt(), level = reader.GetInt();
+                    var layer = (PieceLayer)reader.GetByte();
+                    bool built = reader.GetByte() != 0;
+                    pieces.Add(new BlueprintPieceView(
+                        new PlannedPiece(kind, material, new PieceSlot(x, y, level, layer)), built));
+                }
+                int storageCount = reader.GetByte();
+                var storage = new Dictionary<ItemId, int>(storageCount);
+                for (int i = 0; i < storageCount; i++)
+                    storage[(ItemId)reader.GetByte()] = reader.GetInt();
+                BlueprintReceived?.Invoke(siteId, pieces, storage);
+                break;
+            }
+
+            case MessageId.BuildProgress:
+            {
+                long siteId = reader.GetLong();
+                var kind = (BuildPieceKind)reader.GetByte();
+                var material = (BuildMaterial)reader.GetByte();
+                int x = reader.GetInt(), y = reader.GetInt(), level = reader.GetInt();
+                var layer = (PieceLayer)reader.GetByte();
+                int left = reader.GetByte(), total = reader.GetByte();
+                bool completed = reader.GetByte() != 0;
+                BuildProgressed?.Invoke(siteId,
+                    new PlannedPiece(kind, material, new PieceSlot(x, y, level, layer)), left, total, completed);
+                break;
+            }
+
+            case MessageId.BuildSiteRemoved:
+                BuildSiteRemoved?.Invoke(reader.GetLong());
+                break;
 
             case MessageId.Correction:
             {

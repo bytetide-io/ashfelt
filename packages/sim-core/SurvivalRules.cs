@@ -49,6 +49,15 @@ public static class SurvivalRules
     /// top of any starvation loss, so freezing and starving together kill faster.</summary>
     public const int FreezingHealthLossPerMinute = 10;
 
+    /// <summary>Health recovers this many points per minute while well-fed and warm —
+    /// slower than any damage rate, so recovery is earned by staying safe, not instant.</summary>
+    public const int HealthRegenPerMinute = 4;
+
+    /// <summary>Hunger must be at least this (in points) to recover health: a full
+    /// belly heals, a peckish one only holds. This is what makes food and shelter
+    /// worth keeping topped up rather than merely staving off death.</summary>
+    public const int WellFedPoints = 50;
+
     // Per-tick deltas equal the per-minute rates because FixedPerPoint is one
     // minute of ticks (see the type remarks).
     private const int HungerLossPerTick = HungerLossPerMinute;
@@ -57,6 +66,8 @@ public static class SurvivalRules
     private const int WarmthLossPerTick = WarmthLossPerMinute;
     private const int WarmthRegenPerTick = WarmthRegenPerMinute;
     private const int FreezingHealthLossPerTick = FreezingHealthLossPerMinute;
+    private const int HealthRegenPerTick = HealthRegenPerMinute;
+    private const int WellFedFixed = WellFedPoints * FixedPerPoint;
 
     /// <summary>
     /// A player's survival meters, in fixed-point units (0..<see cref="MaxFixed"/>).
@@ -119,7 +130,18 @@ public static class SurvivalRules
         int healthLoss = 0;
         if (hunger == 0) healthLoss += StarvationHealthLossPerTick;
         if (warmth == 0) healthLoss += FreezingHealthLossPerTick;
-        int health = Math.Max(0, state.Health - healthLoss);
+
+        // A player who is losing health cannot also be recovering it. Otherwise,
+        // being warm and well-fed slowly knits health back — the reward for
+        // sheltering and eating rather than merely surviving. A dead player stays
+        // dead; a peckish one holds without healing.
+        int health;
+        if (healthLoss > 0)
+            health = Math.Max(0, state.Health - healthLoss);
+        else if (warm && hunger >= WellFedFixed && state.Health > 0)
+            health = Math.Min(MaxFixed, state.Health + HealthRegenPerTick);
+        else
+            health = state.Health;
 
         int stamina = exerting
             ? state.Stamina
