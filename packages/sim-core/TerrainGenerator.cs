@@ -33,6 +33,11 @@ public sealed class TerrainGenerator
 
     private const uint TreeSalt = 0x7BEE7BEEu;
 
+    /// <summary>Share of open grass that carries a fiber-bearing shrub.</summary>
+    private const int ShrubDensityPercent = 12;
+
+    private const uint ShrubSalt = 0x5C2B5C2Bu;
+
     /// <summary>One tile is this many metres across in the rendered world.</summary>
     public const double TileMetres = 2.0;
 
@@ -85,7 +90,14 @@ public sealed class TerrainGenerator
         if (elevation > RockLevel) return TileType.Rock;
 
         double moisture = Noise.Fbm(wx, wy, _seed ^ 0xA5A5A5A5u, octaves: 3, frequency: 1.0 / 40.0);
-        if (moisture <= 0.55) return TileType.Grass;
+        if (moisture <= 0.55)
+        {
+            // Open grassland: scatter walkable shrubs to gather fiber from,
+            // sparse enough that the field still reads as grass.
+            return Noise.Hash(wx, wy, _seed ^ ShrubSalt) % 100 < ShrubDensityPercent
+                ? TileType.Shrub
+                : TileType.Grass;
+        }
 
         // A Forest tile is one tree, and trees block movement. Scattering them
         // through the woodland band leaves clearings and paths, instead of a
@@ -110,5 +122,5 @@ public sealed class TerrainGenerator
     /// standing up off the ground. Chop or mine them to open a path.
     /// </summary>
     public static bool IsWalkable(TileType t) =>
-        t is TileType.Sand or TileType.Grass;
+        t is TileType.Sand or TileType.Grass or TileType.Shrub;
 }

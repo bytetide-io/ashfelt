@@ -8,4 +8,6 @@ public enum TileType : byte
     Grass = 3,
     Forest = 4,
     Rock = 5,
+    /// <summary>Low plants scattered in grassland; walkable, gathered for fiber.</summary>
+    Shrub = 6,
 }

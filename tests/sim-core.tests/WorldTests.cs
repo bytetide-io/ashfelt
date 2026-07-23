@@ -41,6 +41,20 @@ public class WorldTests
     }
 
     [Fact]
+    public void GatheringShrub_YieldsFiberAndLeavesGrass()
+    {
+        var world = new World(1337);
+        var (x, y) = FindTile(world, TileType.Shrub);
+
+        var result = world.TryHarvest(x, y);
+
+        Assert.True(result.Allowed);
+        Assert.Equal(ItemId.Fiber, result.Item);
+        Assert.Equal(1, result.Amount);
+        Assert.Equal(TileType.Grass, world.TileAt(x, y));
+    }
+
+    [Fact]
     public void ChoppingWater_IsRefusedAndRecordsNoDiff()
     {
         var world = new World(1337);

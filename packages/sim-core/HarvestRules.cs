@@ -15,6 +15,7 @@ public static class HarvestRules
     {
         TileType.Forest => new Harvest(true, ItemId.Wood, 1, TileType.Grass),
         TileType.Rock => new Harvest(true, ItemId.Stone, 1, TileType.Sand),
+        TileType.Shrub => new Harvest(true, ItemId.Fiber, 1, TileType.Grass),
         _ => new Harvest(false, ItemId.None, 0, tile),
     };
 
