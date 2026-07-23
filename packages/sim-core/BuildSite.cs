@@ -145,6 +145,14 @@ public sealed class BuildSite
         return Strike(piece);
     }
 
+    /// <summary>
+    /// The piece the site would build on the next strike, without striking it —
+    /// so the caller can reach-check the player against that piece's cell before
+    /// authorising the build. Null when nothing can be built yet.
+    /// </summary>
+    public PlannedPiece? PeekNextBuildable(Func<int, int, bool> groundBuildable) =>
+        NextBuildable(groundBuildable);
+
     private BuildStrike Strike(PlannedPiece piece)
     {
         int total = BuildingRules.HitsToBuild(piece.Kind, piece.Material);

@@ -60,6 +60,44 @@ public enum MessageId : byte
     /// </summary>
     EatRequest = 8,
 
+    /// <summary>
+    /// Commit a designed blueprint into a build site the player then supplies.
+    /// Layout: ushort pieceCount, then each piece as byte kind
+    /// (<see cref="BuildPieceKind"/>), byte material (<see cref="BuildMaterial"/>),
+    /// int x, int y, int level, byte layer (<see cref="PieceLayer"/>). The server
+    /// canonicalises each slot, validates the whole plan against the shared
+    /// <c>BuildingRules</c> and the terrain, and on success creates a build site
+    /// owned by this character and replies with <see cref="BlueprintState"/>. An
+    /// illegal or empty plan is dropped.
+    /// </summary>
+    CommitBlueprint = 9,
+
+    /// <summary>
+    /// Deposit materials from inventory into a build site's on-site storage.
+    /// Layout: long siteId, byte item id, int amount. The server takes only what
+    /// the site's pending pieces still need and only what the player actually
+    /// holds; the reduced inventory and updated site come back as the usual
+    /// inventory and <see cref="BlueprintState"/> updates. Only the owner may
+    /// supply their own site.
+    /// </summary>
+    DepositRequest = 10,
+
+    /// <summary>
+    /// Advance construction at a build site by one strike on its next buildable
+    /// piece. Layout: long siteId. The server picks the lowest, most foundational
+    /// pending piece whose supports are built and whose materials are on site,
+    /// checks the player is within reach of it, and strikes it — broadcasting
+    /// <see cref="BuildProgress"/>. Only the owner may build their own site.
+    /// </summary>
+    BuildRequest = 11,
+
+    /// <summary>
+    /// Tear down a build site: refund its stockpiled materials to the owner and
+    /// remove every piece, built or pending. Layout: long siteId. The server
+    /// broadcasts <see cref="BuildSiteRemoved"/>. Only the owner may cancel.
+    /// </summary>
+    CancelBlueprint = 12,
+
     // server -> client
     Welcome = 100,
     ChunkData = 101,
@@ -114,12 +152,37 @@ public enum MessageId : byte
     /// connected to and owned by this world-server — nothing was released.
     /// </summary>
     ReleaseDenied = 110,
+
+    /// <summary>
+    /// The full state of one build site, sent only to its owner: the private
+    /// hologram plus construction and stockpile progress. Layout: long siteId,
+    /// ushort pieceCount, then each piece as byte kind, byte material, int x,
+    /// int y, int level, byte layer, byte built; then byte storageCount, then
+    /// each stored line as byte item id, int amount. Sent on commit, on deposit
+    /// and on a piece completing, and backfilled for the owner's sites on join.
+    /// </summary>
+    BlueprintState = 112,
+
+    /// <summary>
+    /// One construction strike landed on a piece. Layout: long siteId, byte kind,
+    /// byte material, int x, int y, int level, byte layer, byte strikesLeft, byte
+    /// strikesTotal, byte completed. A completed strike is broadcast to everyone so
+    /// the built piece appears in the shared world; a partial strike goes only to
+    /// the owner, since unbuilt pieces are the owner's private plan.
+    /// </summary>
+    BuildProgress = 113,
+
+    /// <summary>
+    /// A build site was torn down; clients drop all of its pieces. Layout: long
+    /// siteId. Broadcast, because others may have seen its built pieces.
+    /// </summary>
+    BuildSiteRemoved = 114,
 }
 
 public static class ProtocolVersion
 {
     /// <summary>Bumped whenever message layout changes. Mismatched peers are rejected.</summary>
-    public const int Current = 10;
+    public const int Current = 11;
 }
 
 /// <summary>Item kinds. Values are wire-stable — append only, never renumber.</summary>
