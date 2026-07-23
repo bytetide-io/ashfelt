@@ -59,6 +59,14 @@ public sealed class BuildSite
         return false;
     }
 
+    /// <summary>True when a built, solid piece (a wall or window) fills the slot —
+    /// what the movement rules read to stop a player at a raised wall.</summary>
+    public bool IsSolidAt(PieceSlot slot) =>
+        _built.Contains(slot)
+        && _pieces.TryGetValue(slot, out var piece)
+        && StructureCatalog.TryGet(piece.Kind, piece.Material, out var def)
+        && def.Solid;
+
     public int PieceCount => _pieces.Count;
     public int BuiltCount => _built.Count;
     public bool IsComplete => _built.Count == _pieces.Count;

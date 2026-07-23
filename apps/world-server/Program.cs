@@ -30,6 +30,10 @@ foreach (var loadedSite in await store.LoadBuildSitesAsync())
 }
 Console.WriteLine($"[world] restored {buildSites.Count} build site(s)");
 
+// Reads live terrain, structures and built walls to bound where a player may
+// move — the authority behind the client's own collision.
+var obstacles = new WorldObstacles(world, buildSites);
+
 var players = new Dictionary<NetPeer, Player>();
 var writer = new NetDataWriter();
 int nextPlayerId = 1;
@@ -207,7 +211,7 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
             // The client simulates physics; the server decides whether the
             // result was possible. Anything else is taken on trust nowhere.
-            var rejection = player.TryAccept(world.Terrain, reported, yaw, Now());
+            var rejection = player.TryAccept(world.Terrain, reported, yaw, Now(), obstacles);
             if (rejection == MoveRejection.None) break;
 
             Console.WriteLine($"[world] player {player.Id} move rejected: {rejection}");

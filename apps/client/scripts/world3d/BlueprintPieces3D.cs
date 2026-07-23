@@ -44,7 +44,26 @@ public static class BlueprintPieces3D
         // A wall box lies along X by default; the east edge runs along Z, so turn it.
         if (slot.Layer == PieceLayer.WallEast) node.Rotation = new Vector3(0, Mathf.Pi * 0.5f, 0);
         Paint(node, MaterialFor(piece, ghost, valid));
-        return node;
+
+        // A built, solid piece collides; a ghost (pending or cursor) is walked
+        // through, so a plan never blocks the player laying it out.
+        bool solid = !ghost
+            && StructureCatalog.TryGet(piece.Kind, piece.Material, out var def)
+            && def.Solid;
+        return solid ? WithCollision(node) : node;
+    }
+
+    /// <summary>Wraps a solid piece's box in a static body with a matching collider,
+    /// keeping its world transform so it blocks exactly where it is drawn.</summary>
+    private static Node3D WithCollision(Node3D node)
+    {
+        var body = new StaticBody3D { Position = node.Position, Rotation = node.Rotation };
+        node.Position = Vector3.Zero;
+        node.Rotation = Vector3.Zero;
+        body.AddChild(node);
+        if (node is MeshInstance3D { Mesh: BoxMesh box })
+            body.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = box.Size } });
+        return body;
     }
 
     private static Node3D Geometry(BuildPieceKind kind, float metres) => kind switch

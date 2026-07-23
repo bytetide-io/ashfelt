@@ -78,6 +78,13 @@ public partial class World3D : Node3D
     private readonly Dictionary<long, OwnedSite> _ownedSites = new();
     private long _activeSite = -1;
 
+    /// <summary>Full-tile collision bodies for standing trees, keyed by tile so a
+    /// felled tree's blocker is removed exactly when its foliage collapses. Matches
+    /// the server, which stops a player from entering a Forest tile.</summary>
+    private Node3D _obstacleRoot = null!;
+    private readonly Dictionary<(int, int), Node3D> _obstacleColliders = new();
+    private const float TreeColliderHeight = 3.0f;
+
     private WorldConnection _connection = null!;
     private PlayerBody _player = null!;
     private Label _status = null!;
@@ -213,6 +220,7 @@ public partial class World3D : Node3D
 
         _ownedSites.Clear();
         _activeSite = -1;
+        _obstacleColliders.Clear(); // freed with _worldRoot
         _cursorGhost = null; // freed with _worldRoot
         if (_buildMode) SetBuildMode(false);
     }
@@ -352,6 +360,12 @@ public partial class World3D : Node3D
             RegisterFoliage(treeTiles[i], trunkFoliage.Multimesh, i);
             RegisterFoliage(treeTiles[i], canopyFoliage.Multimesh, i);
         }
+
+        // A tree is solid: give every Forest tile a full-tile collider so the
+        // player stops at it, matching the server's Forest-tile block.
+        _obstacleRoot = new Node3D { Name = "Obstacles" };
+        _worldRoot.AddChild(_obstacleRoot);
+        foreach (var tile in treeTiles) AddTreeCollider(tile);
 
         var tuftFoliage = BuildFoliage(tufts, new SphereMesh
         {
@@ -504,6 +518,25 @@ public partial class World3D : Node3D
         if (!_foliageByTile.TryGetValue(tile, out var refs))
             _foliageByTile[tile] = refs = new List<FoliageRef>();
         refs.Add(new FoliageRef(mesh, index, mesh.GetInstanceTransform(index)));
+    }
+
+    private void AddTreeCollider((int X, int Y) tile)
+    {
+        double metres = TerrainGenerator.TileMetres;
+        float baseY = (float)_terrain.HeightAt(tile.X + 0.5, tile.Y + 0.5);
+        var body = new StaticBody3D
+        {
+            Position = new Vector3(
+                (float)((tile.X + 0.5) * metres),
+                baseY + TreeColliderHeight * 0.5f,
+                (float)((tile.Y + 0.5) * metres)),
+        };
+        body.AddChild(new CollisionShape3D
+        {
+            Shape = new BoxShape3D { Size = new Vector3((float)metres, TreeColliderHeight, (float)metres) },
+        });
+        _obstacleRoot.AddChild(body);
+        _obstacleColliders[tile] = body;
     }
 
     /// <summary>A press that travels less than this before release is a tap
@@ -778,6 +811,9 @@ public partial class World3D : Node3D
         // node it used to be — the fix for re-tapping a felled stump forever.
         _tileDiffs[(tileX, tileY)] = (TileType)tile;
 
+        // A felled tree stops blocking: drop its collider as its foliage collapses.
+        if (_obstacleColliders.Remove((tileX, tileY), out var collider)) collider.QueueFree();
+
         if (!_foliageByTile.TryGetValue((tileX, tileY), out var refs)) return;
 
         var collapsed = new Basis(Vector3.Zero, Vector3.Zero, Vector3.Zero);
@@ -859,12 +895,25 @@ public partial class World3D : Node3D
         _ => BuildWall(),
     };
 
-    private static MeshInstance3D BuildWall() => new()
+    private static Node3D BuildWall()
     {
-        Mesh = new BoxMesh { Size = new Vector3((float)TerrainGenerator.TileMetres, 2.4f, 0.4f) },
-        Position = Vector3.Up * 1.2f,
-        MaterialOverride = FlatMaterial(WallColour),
-    };
+        float metres = (float)TerrainGenerator.TileMetres;
+        var body = new StaticBody3D();
+        body.AddChild(new MeshInstance3D
+        {
+            Mesh = new BoxMesh { Size = new Vector3(metres, 2.4f, 0.4f) },
+            Position = Vector3.Up * 1.2f,
+            MaterialOverride = FlatMaterial(WallColour),
+        });
+        // A placed wall blocks its whole tile on the server; match that with a
+        // full-tile collider so the player is stopped consistently.
+        body.AddChild(new CollisionShape3D
+        {
+            Shape = new BoxShape3D { Size = new Vector3(metres, 2.4f, metres) },
+            Position = Vector3.Up * 1.2f,
+        });
+        return body;
+    }
 
     private static Node3D BuildCampfire()
     {
