@@ -78,11 +78,13 @@ public partial class World3D : Node3D
     private readonly Dictionary<long, OwnedSite> _ownedSites = new();
     private long _activeSite = -1;
 
-    /// <summary>Full-tile collision bodies for standing trees, keyed by tile so a
-    /// felled tree's blocker is removed exactly when its foliage collapses. Matches
-    /// the server, which stops a player from entering a Forest tile.</summary>
-    private Node3D _obstacleRoot = null!;
-    private readonly Dictionary<(int, int), Node3D> _obstacleColliders = new();
+    /// <summary>One static body carries every tree's collider as a child shape,
+    /// keyed by tile so a felled tree's shape is removed when its foliage collapses.
+    /// A single body rather than one-per-tree keeps the physics broadphase cheap —
+    /// this is a mobile-only game with a tight CPU budget. Matches the server, which
+    /// stops a player from entering a Forest tile.</summary>
+    private StaticBody3D _obstacleBody = null!;
+    private readonly Dictionary<(int, int), CollisionShape3D> _obstacleColliders = new();
     private const float TreeColliderHeight = 3.0f;
 
     private WorldConnection _connection = null!;
@@ -362,9 +364,10 @@ public partial class World3D : Node3D
         }
 
         // A tree is solid: give every Forest tile a full-tile collider so the
-        // player stops at it, matching the server's Forest-tile block.
-        _obstacleRoot = new Node3D { Name = "Obstacles" };
-        _worldRoot.AddChild(_obstacleRoot);
+        // player stops at it, matching the server's Forest-tile block. All the
+        // colliders hang off one static body to keep the broadphase cheap.
+        _obstacleBody = new StaticBody3D { Name = "Obstacles" };
+        _worldRoot.AddChild(_obstacleBody);
         foreach (var tile in treeTiles) AddTreeCollider(tile);
 
         var tuftFoliage = BuildFoliage(tufts, new SphereMesh
@@ -524,19 +527,16 @@ public partial class World3D : Node3D
     {
         double metres = TerrainGenerator.TileMetres;
         float baseY = (float)_terrain.HeightAt(tile.X + 0.5, tile.Y + 0.5);
-        var body = new StaticBody3D
+        var shape = new CollisionShape3D
         {
+            Shape = new BoxShape3D { Size = new Vector3((float)metres, TreeColliderHeight, (float)metres) },
             Position = new Vector3(
                 (float)((tile.X + 0.5) * metres),
                 baseY + TreeColliderHeight * 0.5f,
                 (float)((tile.Y + 0.5) * metres)),
         };
-        body.AddChild(new CollisionShape3D
-        {
-            Shape = new BoxShape3D { Size = new Vector3((float)metres, TreeColliderHeight, (float)metres) },
-        });
-        _obstacleRoot.AddChild(body);
-        _obstacleColliders[tile] = body;
+        _obstacleBody.AddChild(shape);
+        _obstacleColliders[tile] = shape;
     }
 
     /// <summary>A press that travels less than this before release is a tap
