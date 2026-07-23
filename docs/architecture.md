@@ -74,6 +74,14 @@ the same seed and coordinate yield the same tile on every device. This is
 covered by `tests/sim-core.tests/DeterminismTests.cs`; treat those tests as a
 compatibility contract — changing generation changes every existing world.
 
+### Generation changes on record
+
+- **Shrub tile (pre-alpha).** A walkable `Shrub` tile was scattered into the
+  open-grass band so fiber has a gather source (and rope becomes craftable).
+  This alters `TerrainGenerator.TileAt` output, so worlds generated before it
+  differ — acceptable because no world has shipped. The determinism tests still
+  pass: they assert consistency and biome variety, not fixed tile values.
+
 ## Target frameworks
 
 - `sim-core`, `shared-proto`, `client` → **net8.0** (Godot 4's runtime).
