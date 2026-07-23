@@ -21,6 +21,7 @@ public static class BlueprintPieces3D
 
     private static readonly Color WoodColour = new("8a6a43");
     private static readonly Color StoneColour = new("8d9099");
+    private static readonly Color ThatchColour = new("c2a24a");
     private static readonly Color GlassColour = new("9fd3e0");
 
     /// <summary>The storey height a level adds, so upper floors stack cleanly.</summary>
@@ -114,6 +115,7 @@ public static class BlueprintPieces3D
             : piece.Material switch
             {
                 BuildMaterial.Stone => StoneColour,
+                BuildMaterial.Thatch => ThatchColour,
                 _ => WoodColour,
             };
 

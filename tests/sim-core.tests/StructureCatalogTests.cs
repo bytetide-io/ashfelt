@@ -72,6 +72,28 @@ public class StructureCatalogTests
     }
 
     [Fact]
+    public void AThatchRoof_IsAnEarlyShelter_BuiltFromFiber()
+    {
+        Assert.True(StructureCatalog.TryGet(BuildPieceKind.Roof, BuildMaterial.Thatch, out var def));
+        Assert.True(def.ProvidesShelter);
+        Assert.Contains(def.Cost, line => line.Item == ItemId.Fiber);
+        Assert.DoesNotContain(def.Cost, line => line.Item == ItemId.Plank);
+    }
+
+    [Fact]
+    public void MaterialsFor_OffersOnlyWhatAKindSupports()
+    {
+        var roofMaterials = StructureCatalog.MaterialsFor(BuildPieceKind.Roof);
+        Assert.Contains(BuildMaterial.Thatch, roofMaterials);
+        Assert.Contains(BuildMaterial.Wood, roofMaterials);
+
+        var wallMaterials = StructureCatalog.MaterialsFor(BuildPieceKind.Wall);
+        Assert.Contains(BuildMaterial.Wood, wallMaterials);
+        Assert.Contains(BuildMaterial.Stone, wallMaterials);
+        Assert.DoesNotContain(BuildMaterial.Thatch, wallMaterials); // no flimsy thatch walls
+    }
+
+    [Fact]
     public void ShelteringPieces_IncludeWallsAndRoof_NotFoundations()
     {
         Assert.True(StructureCatalog.Of(BuildPieceKind.Roof, BuildMaterial.Wood).ProvidesShelter);

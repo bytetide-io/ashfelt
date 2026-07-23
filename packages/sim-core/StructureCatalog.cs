@@ -84,6 +84,9 @@ public static class StructureCatalog
             Solid: false, ProvidesShelter: false, IsStation: false, BuildStrikes: 2, Tier: 1,
             Cost: new MaterialCost[] { new(ItemId.Wood, 3) }),
 
+        new(BuildPieceKind.Roof, BuildMaterial.Thatch, PieceLayer.Cover, SupportKind.WallOrPost,
+            Solid: false, ProvidesShelter: true, IsStation: false, BuildStrikes: 2, Tier: 1,
+            Cost: new MaterialCost[] { new(ItemId.Fiber, 5) }),
         new(BuildPieceKind.Roof, BuildMaterial.Wood, PieceLayer.Cover, SupportKind.WallOrPost,
             Solid: false, ProvidesShelter: true, IsStation: false, BuildStrikes: 2, Tier: 1,
             Cost: new MaterialCost[] { new(ItemId.Plank, 3) }),
@@ -100,6 +103,18 @@ public static class StructureCatalog
         ByKey.TryGetValue((kind, material), out var def)
             ? def
             : throw new ArgumentOutOfRangeException(nameof(kind), (kind, material), "No StructureDef for this pair.");
+
+    /// <summary>
+    /// The materials a piece kind can be built from, in catalog order — so the
+    /// designer only ever offers a material that actually exists for the piece.
+    /// </summary>
+    public static IReadOnlyList<BuildMaterial> MaterialsFor(BuildPieceKind kind)
+    {
+        var materials = new List<BuildMaterial>();
+        foreach (var def in All)
+            if (def.Kind == kind && !materials.Contains(def.Material)) materials.Add(def.Material);
+        return materials;
+    }
 
     /// <summary>The layer a piece kind fills, independent of which wall edge a wall lands on.</summary>
     public static PieceLayer LayerOf(BuildPieceKind kind) => kind switch

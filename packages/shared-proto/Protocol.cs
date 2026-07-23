@@ -237,6 +237,8 @@ public enum BuildMaterial : byte
     None = 0,
     Wood = 1,
     Stone = 2,
+    /// <summary>Woven reeds/fiber — a cheap early roof, raised before planks exist.</summary>
+    Thatch = 3,
 }
 
 /// <summary>

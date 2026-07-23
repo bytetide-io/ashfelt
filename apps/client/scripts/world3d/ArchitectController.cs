@@ -47,13 +47,29 @@ public partial class ArchitectController : Node3D
     public void CycleKind(int direction)
     {
         _kindIndex = (_kindIndex + direction + Kinds.Length) % Kinds.Length;
+        ClampMaterial();
         Changed?.Invoke();
     }
 
+    /// <summary>Steps to the next material this piece kind actually supports, so a
+    /// thatch roof and a stone wall are offered but a thatch wall never is.</summary>
     public void CycleMaterial()
     {
-        Material = Material == BuildMaterial.Wood ? BuildMaterial.Stone : BuildMaterial.Wood;
+        var materials = StructureCatalog.MaterialsFor(Kind);
+        if (materials.Count == 0) return;
+
+        int current = 0;
+        for (int i = 0; i < materials.Count; i++)
+            if (materials[i] == Material) { current = i; break; }
+        Material = materials[(current + 1) % materials.Count];
         Changed?.Invoke();
+    }
+
+    /// <summary>Keeps the selected material valid for the current kind after a kind change.</summary>
+    private void ClampMaterial()
+    {
+        var materials = StructureCatalog.MaterialsFor(Kind);
+        if (materials.Count > 0 && !materials.Contains(Material)) Material = materials[0];
     }
 
     /// <summary>
