@@ -650,7 +650,11 @@ public partial class World3D : Node3D
         // Input is a request, never a state change. In build mode a tap lays a
         // ghost into the private draft; otherwise it asks the server to harvest.
         if (_buildMode) PlaceCursorPiece();
-        else if (_gatherTarget is { } target) _connection.SendChop(target.X, target.Y);
+        else if (_gatherTarget is { } target)
+        {
+            _connection.SendChop(target.X, target.Y);
+            _player.Gather();
+        }
     }
 
     // ---- Architect mode ------------------------------------------------
@@ -1071,20 +1075,8 @@ public partial class World3D : Node3D
     /// world looks hand-placed rather than smoothly lit.
     /// </summary>
     private static StandardMaterial3D FlatMaterial(
-        Color? albedo = null, Texture2D? texture = null, Vector3? uvScale = null)
-    {
-        var material = new StandardMaterial3D
-        {
-            AlbedoColor = albedo ?? Colors.White,
-            Roughness = 1.0f,
-            DiffuseMode = BaseMaterial3D.DiffuseModeEnum.Toon,
-            SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
-            TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest,
-        };
-        if (texture is not null) material.AlbedoTexture = texture;
-        if (uvScale is { } scale) material.Uv1Scale = scale;
-        return material;
-    }
+        Color? albedo = null, Texture2D? texture = null, Vector3? uvScale = null) =>
+        WorldMaterials.Flat(albedo, texture, uvScale);
 
     /// <summary>
     /// One MultiMesh per part keeps thousands of trees to two draw calls,
