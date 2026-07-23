@@ -54,6 +54,30 @@ public partial class World3D : Node3D
     private readonly Dictionary<long, Node3D> _structures = new();
     private Node3D _structureRoot = null!;
 
+    private BlueprintView _blueprints = null!;
+    private ArchitectController _architect = null!;
+    private bool _buildMode;
+    private Node3D? _cursorGhost;
+    private PieceSlot _cursorSlot;
+    private BuildPieceKind _cursorKind;
+    private BuildMaterial _cursorMaterial;
+
+    /// <summary>The player's latest inventory, mirrored here so a deposit knows how
+    /// much of each material to offer a build site.</summary>
+    private IReadOnlyDictionary<ItemId, int> _inventory = new Dictionary<ItemId, int>();
+
+    /// <summary>Owned build sites the player can supply and raise, keyed by server id.
+    /// A representative cell measures reach; the needed items bound a "deposit all".</summary>
+    private sealed class OwnedSite
+    {
+        public int CellX;
+        public int CellY;
+        public readonly HashSet<ItemId> Needs = new();
+    }
+
+    private readonly Dictionary<long, OwnedSite> _ownedSites = new();
+    private long _activeSite = -1;
+
     private WorldConnection _connection = null!;
     private PlayerBody _player = null!;
     private Label _status = null!;
@@ -108,6 +132,32 @@ public partial class World3D : Node3D
             CallDeferred(nameof(OnTileChanged), tx, ty, (int)tile);
         _connection.HarvestProgress += (tx, ty, left, total) =>
             CallDeferred(nameof(OnHarvestProgress), tx, ty, left, total);
+        _connection.InventoryUpdated += inventory => _inventory = inventory;
+
+        // Blueprint events flow through the world so a single subscription survives
+        // world rebuilds: the connection outlives a voyage, the renderer does not.
+        _connection.BlueprintReceived += (siteId, pieces, _) =>
+        {
+            _blueprints?.QueueBlueprint(siteId, pieces);
+            TrackOwnedSite(siteId, pieces);
+        };
+        _connection.BuildProgressed += (siteId, piece, _, _, completed) =>
+            _blueprints?.QueueProgress(siteId, piece, completed);
+        _connection.BuildSiteRemoved += siteId =>
+        {
+            _blueprints?.QueueRemove(siteId);
+            _ownedSites.Remove(siteId);
+        };
+
+        _hud.ArchitectToggled += () => SetBuildMode(!_buildMode);
+        _hud.ArchitectCycleKind += direction => _architect?.CycleKind(direction);
+        _hud.ArchitectCycleMaterial += () => _architect?.CycleMaterial();
+        _hud.ArchitectUndo += () => _architect?.Undo();
+        _hud.ArchitectCommit += CommitBlueprint;
+        _hud.ArchitectExit += () => SetBuildMode(false);
+        _hud.BuildHerePressed += () => { if (_activeSite >= 0) _connection.SendBuild(_activeSite); };
+        _hud.DepositPressed += DepositAtActiveSite;
+
         ShowStatus(_connection.Status);
     }
 
@@ -160,6 +210,11 @@ public partial class World3D : Node3D
         _tileDiffs.Clear();
         _structures.Clear();
         _remotes.Clear();
+
+        _ownedSites.Clear();
+        _activeSite = -1;
+        _cursorGhost = null; // freed with _worldRoot
+        if (_buildMode) SetBuildMode(false);
     }
 
     /// <summary>Realign the local clock to the server's authoritative time-of-day.</summary>
@@ -244,6 +299,15 @@ public partial class World3D : Node3D
 
         _structureRoot = new Node3D { Name = "Structures" };
         _worldRoot.AddChild(_structureRoot);
+
+        _blueprints = new BlueprintView { Name = "Blueprints" };
+        _worldRoot.AddChild(_blueprints);
+        _blueprints.Bind(_terrain);
+
+        _architect = new ArchitectController { Name = "Architect" };
+        _worldRoot.AddChild(_architect);
+        _architect.Bind(_terrain, (x, y) => TerrainGenerator.IsWalkable(EffectiveTile(x, y)));
+        _architect.Changed += RefreshArchitectHud;
 
         var trunks = new List<Transform3D>();
         var canopies = new List<Transform3D>();
@@ -490,14 +554,156 @@ public partial class World3D : Node3D
 
     public override void _PhysicsProcess(double delta)
     {
-        UpdateGatherPrompt();
+        if (_buildMode)
+        {
+            UpdateBuildCursor();
+        }
+        else if (_built)
+        {
+            UpdateGatherPrompt();
+            UpdateSiteProximity();
+        }
 
         if (!_harvestQueued) return;
         _harvestQueued = false;
 
-        // Input is a request, never a state change: the tile does not change here.
-        // The server's TileChanged / HarvestProgress is what wears down the node.
-        if (_gatherTarget is { } target) _connection.SendChop(target.X, target.Y);
+        // Input is a request, never a state change. In build mode a tap lays a
+        // ghost into the private draft; otherwise it asks the server to harvest.
+        if (_buildMode) PlaceCursorPiece();
+        else if (_gatherTarget is { } target) _connection.SendChop(target.X, target.Y);
+    }
+
+    // ---- Architect mode ------------------------------------------------
+
+    /// <summary>The cell directly in front of the player — where a piece would land.</summary>
+    private (int X, int Y) FrontCell()
+    {
+        float yaw = _player.Facing;
+        var forward = new Vector3(-Mathf.Sin(yaw), 0f, -Mathf.Cos(yaw));
+        float metres = (float)TerrainGenerator.TileMetres;
+        Vector3 target = _player.GlobalPosition + forward * (PlaceReachTiles * metres);
+        return (Mathf.FloorToInt(target.X / metres), Mathf.FloorToInt(target.Z / metres));
+    }
+
+    /// <summary>
+    /// Shows a translucent cursor of the current piece at the targeted slot, so the
+    /// player sees exactly what a tap will place. Rebuilt only when the slot, kind
+    /// or material changes, so it is not remeshed every frame.
+    /// </summary>
+    private void UpdateBuildCursor()
+    {
+        var (cx, cy) = FrontCell();
+        var slot = _architect.SlotFor(cx, cy, _player.GlobalPosition);
+        if (_cursorGhost is not null && slot.Equals(_cursorSlot)
+            && _cursorKind == _architect.Kind && _cursorMaterial == _architect.Material)
+            return;
+
+        _cursorGhost?.QueueFree();
+        _cursorSlot = slot;
+        _cursorKind = _architect.Kind;
+        _cursorMaterial = _architect.Material;
+        var piece = new PlannedPiece(_architect.Kind, _architect.Material, slot);
+        _cursorGhost = BlueprintPieces3D.Build(piece, _terrain, ghost: true);
+        _worldRoot.AddChild(_cursorGhost);
+    }
+
+    private void PlaceCursorPiece()
+    {
+        var (cx, cy) = FrontCell();
+        _architect.Toggle(_architect.SlotFor(cx, cy, _player.GlobalPosition));
+    }
+
+    /// <summary>Enter or leave the private architect view.</summary>
+    private void SetBuildMode(bool on)
+    {
+        _buildMode = on;
+        _hud.SetBuildMode(on);
+        if (on)
+        {
+            RefreshArchitectHud();
+        }
+        else
+        {
+            _cursorGhost?.QueueFree();
+            _cursorGhost = null;
+            _cursorKind = default;
+            _architect?.Clear();
+        }
+    }
+
+    private void RefreshArchitectHud()
+    {
+        if (_architect is null) return;
+        _hud.UpdateArchitect(
+            Prettify(_architect.Kind.ToString()),
+            Prettify(_architect.Material.ToString()),
+            _architect.BillOfMaterials(),
+            _architect.Validation().Ok);
+    }
+
+    private static string Prettify(string enumName) => enumName.ToUpperInvariant();
+
+    private void CommitBlueprint()
+    {
+        var pieces = _architect.Commit();
+        if (pieces.Count == 0) return;
+        _connection.SendCommitBlueprint(pieces);
+        SetBuildMode(false);
+    }
+
+    /// <summary>Tracks the nearest owned site in reach so its build actions surface.</summary>
+    private void UpdateSiteProximity()
+    {
+        _activeSite = -1;
+        if (_ownedSites.Count == 0) { _hud.ShowSiteActions(false); return; }
+
+        float metres = (float)TerrainGenerator.TileMetres;
+        float range = (float)Proto.Tuning.ChopRangeMetres;
+        Vector3 p = _player.GlobalPosition;
+        float bestSq = range * range;
+
+        foreach (var (id, site) in _ownedSites)
+        {
+            float cx = (site.CellX + 0.5f) * metres;
+            float cz = (site.CellY + 0.5f) * metres;
+            float distSq = (p.X - cx) * (p.X - cx) + (p.Z - cz) * (p.Z - cz);
+            if (distSq > bestSq) continue;
+            bestSq = distSq;
+            _activeSite = id;
+        }
+        _hud.ShowSiteActions(_activeSite >= 0);
+    }
+
+    private void DepositAtActiveSite()
+    {
+        if (_activeSite < 0 || !_ownedSites.TryGetValue(_activeSite, out var site)) return;
+        foreach (var item in site.Needs)
+        {
+            int have = _inventory.GetValueOrDefault(item);
+            if (have > 0) _connection.SendDeposit(_activeSite, item, have);
+        }
+    }
+
+    /// <summary>Records an owned site's reach cell and the materials it consumes, from
+    /// the authoritative blueprint the server just sent.</summary>
+    private void TrackOwnedSite(long siteId, IReadOnlyList<BlueprintPieceView> pieces)
+    {
+        var site = new OwnedSite { CellX = 0, CellY = 0 };
+        var planned = new List<PlannedPiece>(pieces.Count);
+        bool first = true;
+        foreach (var view in pieces)
+        {
+            planned.Add(view.Piece);
+            var slot = view.Piece.Slot;
+            if (first || slot.X < site.CellX || (slot.X == site.CellX && slot.Y < site.CellY))
+            {
+                site.CellX = slot.X;
+                site.CellY = slot.Y;
+                first = false;
+            }
+        }
+        foreach (var line in BuildingRules.BillOfMaterials(planned)) site.Needs.Add(line.Item);
+        _ownedSites[siteId] = site;
     }
 
     /// <summary>
