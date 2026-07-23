@@ -56,6 +56,8 @@ public partial class World3D : Node3D
 
     private BlueprintView _blueprints = null!;
     private ArchitectController _architect = null!;
+    private ArchitectCamera _architectCamera = null!;
+    private Camera3D _orbitCamera = null!;
     private bool _buildMode;
     private Node3D? _cursorGhost;
     private PieceSlot _cursorSlot;
@@ -115,6 +117,9 @@ public partial class World3D : Node3D
         _hud = GetNode<SurvivalHud>(HudPath);
         _sun = GetNode<DirectionalLight3D>("Sun");
         _environment = GetNode<WorldEnvironment>("WorldEnvironment");
+        _orbitCamera = GetNode<Camera3D>("CameraRig/SpringArm3D/Camera3D");
+        _architectCamera = new ArchitectCamera { Name = "ArchitectCamera" };
+        AddChild(_architectCamera);
         // The CRT grade sits over the world but under the HUD's own CanvasLayer,
         // so scanlines never dim the interface.
         _crt = new CrtOverlay();
@@ -159,8 +164,8 @@ public partial class World3D : Node3D
         };
 
         _hud.ArchitectToggled += () => SetBuildMode(!_buildMode);
-        _hud.ArchitectCycleKind += direction => _architect?.CycleKind(direction);
-        _hud.ArchitectCycleMaterial += () => _architect?.CycleMaterial();
+        _hud.ArchitectSelectKind += kind => _architect?.SelectKind(kind);
+        _hud.ArchitectSelectMaterial += material => _architect?.SelectMaterial(material);
         _hud.ArchitectUndo += () => _architect?.Undo();
         _hud.ArchitectCommit += CommitBlueprint;
         _hud.ArchitectExit += () => SetBuildMode(false);
@@ -608,25 +613,15 @@ public partial class World3D : Node3D
 
     // ---- Architect mode ------------------------------------------------
 
-    /// <summary>The cell directly in front of the player — where a piece would land.</summary>
-    private (int X, int Y) FrontCell()
-    {
-        float yaw = _player.Facing;
-        var forward = new Vector3(-Mathf.Sin(yaw), 0f, -Mathf.Cos(yaw));
-        float metres = (float)TerrainGenerator.TileMetres;
-        Vector3 target = _player.GlobalPosition + forward * (PlaceReachTiles * metres);
-        return (Mathf.FloorToInt(target.X / metres), Mathf.FloorToInt(target.Z / metres));
-    }
-
     /// <summary>
-    /// Shows a translucent cursor of the current piece at the targeted slot, so the
-    /// player sees exactly what a tap will place. Rebuilt only when the slot, kind
-    /// or material changes, so it is not remeshed every frame.
+    /// Shows a translucent cursor of the current piece under the camera reticle, so
+    /// the player sees exactly what a tap will place. Rebuilt only when the slot,
+    /// kind or material changes, so it is not remeshed every frame.
     /// </summary>
     private void UpdateBuildCursor()
     {
-        var (cx, cy) = FrontCell();
-        var slot = _architect.SlotFor(cx, cy, _player.GlobalPosition);
+        var (cx, cy) = _architectCamera.FocusCell();
+        var slot = _architect.SlotFor(cx, cy, _architectCamera.Focus);
         if (_cursorGhost is not null && slot.Equals(_cursorSlot)
             && _cursorKind == _architect.Kind && _cursorMaterial == _architect.Material)
             return;
@@ -642,21 +637,30 @@ public partial class World3D : Node3D
 
     private void PlaceCursorPiece()
     {
-        var (cx, cy) = FrontCell();
-        _architect.Toggle(_architect.SlotFor(cx, cy, _player.GlobalPosition));
+        var (cx, cy) = _architectCamera.FocusCell();
+        _architect.Toggle(_architect.SlotFor(cx, cy, _architectCamera.Focus));
     }
 
-    /// <summary>Enter or leave the private architect view.</summary>
+    /// <summary>
+    /// Enter or leave the private architect view. Entering hands the view to the
+    /// free-pan camera and freezes the character so designing is not walking;
+    /// leaving restores the third-person orbit and the player.
+    /// </summary>
     private void SetBuildMode(bool on)
     {
         _buildMode = on;
         _hud.SetBuildMode(on);
         if (on)
         {
+            _architectCamera.Activate(_player.GlobalPosition + Vector3.Up * 0.5f);
+            _player.ProcessMode = ProcessModeEnum.Disabled;
             RefreshArchitectHud();
         }
         else
         {
+            _architectCamera.Deactivate();
+            _orbitCamera.Current = true;
+            _player.ProcessMode = ProcessModeEnum.Inherit;
             _cursorGhost?.QueueFree();
             _cursorGhost = null;
             _cursorKind = default;
@@ -668,13 +672,8 @@ public partial class World3D : Node3D
     {
         if (_architect is null) return;
         _hud.UpdateArchitect(
-            Prettify(_architect.Kind.ToString()),
-            Prettify(_architect.Material.ToString()),
-            _architect.BillOfMaterials(),
-            _architect.Validation().Ok);
+            _architect.Kind, _architect.Material, _architect.BillOfMaterials(), _architect.Validation().Ok);
     }
-
-    private static string Prettify(string enumName) => enumName.ToUpperInvariant();
 
     private void CommitBlueprint()
     {

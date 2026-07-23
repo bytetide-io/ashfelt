@@ -36,6 +36,9 @@ public partial class ArchitectController : Node3D
     public IReadOnlyList<PlannedPiece> Draft => _draft;
     public bool IsEmpty => _draft.Count == 0;
 
+    /// <summary>The palette's piece kinds, in menu order, for the HUD to lay out.</summary>
+    public static IReadOnlyList<BuildPieceKind> PieceKinds => Kinds;
+
     /// <summary>Fired whenever the draft or selection changes, so the HUD refreshes.</summary>
     public event Action? Changed;
 
@@ -45,24 +48,23 @@ public partial class ArchitectController : Node3D
         _groundBuildable = groundBuildable;
     }
 
-    public void CycleKind(int direction)
+    /// <summary>Selects a piece kind from the palette, keeping the material valid for it.</summary>
+    public void SelectKind(BuildPieceKind kind)
     {
-        _kindIndex = (_kindIndex + direction + Kinds.Length) % Kinds.Length;
+        int index = 0;
+        for (int i = 0; i < Kinds.Length; i++)
+            if (Kinds[i] == kind) { index = i; break; }
+        _kindIndex = index;
         ClampMaterial();
         Changed?.Invoke();
     }
 
-    /// <summary>Steps to the next material this piece kind actually supports, so a
+    /// <summary>Selects a material, ignored unless this piece kind supports it — so a
     /// thatch roof and a stone wall are offered but a thatch wall never is.</summary>
-    public void CycleMaterial()
+    public void SelectMaterial(BuildMaterial material)
     {
-        var materials = StructureCatalog.MaterialsFor(Kind);
-        if (materials.Count == 0) return;
-
-        int current = 0;
-        for (int i = 0; i < materials.Count; i++)
-            if (materials[i] == Material) { current = i; break; }
-        Material = materials[(current + 1) % materials.Count];
+        if (!StructureCatalog.MaterialsFor(Kind).Contains(material)) return;
+        Material = material;
         Changed?.Invoke();
     }
 

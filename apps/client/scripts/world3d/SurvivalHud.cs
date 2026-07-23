@@ -90,8 +90,8 @@ public partial class SurvivalHud : Control
     /// <summary>Architect (blueprint design) intents. Every one is a request the
     /// world or server may still refuse — the HUD only raises them.</summary>
     public event System.Action? ArchitectToggled;
-    public event System.Action<int>? ArchitectCycleKind;
-    public event System.Action? ArchitectCycleMaterial;
+    public event System.Action<BuildPieceKind>? ArchitectSelectKind;
+    public event System.Action<BuildMaterial>? ArchitectSelectMaterial;
     public event System.Action? ArchitectUndo;
     public event System.Action? ArchitectCommit;
     public event System.Action? ArchitectExit;
@@ -102,7 +102,8 @@ public partial class SurvivalHud : Control
 
     private Button _architectToggle = null!;
     private PanelContainer _architectBar = null!;
-    private Label _architectPiece = null!;
+    private readonly Dictionary<BuildPieceKind, Button> _pieceButtons = new();
+    private HBoxContainer _materialRow = null!;
     private Label _architectBom = null!;
     private Button _architectCommit = null!;
     private PanelContainer _siteActions = null!;
@@ -148,10 +149,9 @@ public partial class SurvivalHud : Control
     // ---- Architect mode (blueprint design) ----------------------------
 
     /// <summary>
-    /// The design bar that replaces the hotbar while planning: cycle the piece and
-    /// its material, undo the last, commit the plan or leave. A live bill of
-    /// materials sits above it so the player knows what the build will cost before
-    /// committing to hauling it.
+    /// The design palette that replaces the hotbar while planning: a row of piece
+    /// buttons, the materials the chosen piece supports, undo/commit/exit, and a
+    /// live bill of materials so the player knows the cost before hauling it.
     /// </summary>
     private void BuildArchitectBar()
     {
@@ -166,29 +166,33 @@ public partial class SurvivalHud : Control
         column.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
         _architectBar.AddChild(column);
 
-        _architectBom = DesignSystem.Kicker("EMPTY PLAN", DesignSystem.LabelMuted, 9);
+        _architectBom = DesignSystem.Kicker("EMPTY PLAN — TAP TO PLACE", DesignSystem.LabelMuted, 9);
         _architectBom.HorizontalAlignment = HorizontalAlignment.Center;
         column.AddChild(_architectBom);
 
-        var row = new HBoxContainer();
-        row.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
-        column.AddChild(row);
+        var palette = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ShrinkCenter };
+        palette.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
+        foreach (var kind in ArchitectController.PieceKinds)
+        {
+            var picked = kind;
+            var button = ArchitectButton(PieceLabel(kind), () => ArchitectSelectKind?.Invoke(picked));
+            _pieceButtons[kind] = button;
+            palette.AddChild(button);
+        }
+        column.AddChild(palette);
 
-        row.AddChild(ArchitectButton("◀", () => ArchitectCycleKind?.Invoke(-1)));
-        _architectPiece = DesignSystem.Kicker("FOUNDATION · WOOD", DesignSystem.Parchment, 11);
-        _architectPiece.CustomMinimumSize = new Vector2(150, 0);
-        _architectPiece.HorizontalAlignment = HorizontalAlignment.Center;
-        _architectPiece.VerticalAlignment = VerticalAlignment.Center;
-        row.AddChild(_architectPiece);
-        row.AddChild(ArchitectButton("▶", () => ArchitectCycleKind?.Invoke(1)));
-        row.AddChild(ArchitectButton("MAT", () => ArchitectCycleMaterial?.Invoke()));
-        row.AddChild(ArchitectButton("UNDO", () => ArchitectUndo?.Invoke()));
+        _materialRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ShrinkCenter };
+        _materialRow.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
+        column.AddChild(_materialRow);
 
+        var actions = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ShrinkCenter };
+        actions.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
+        actions.AddChild(ArchitectButton("UNDO", () => ArchitectUndo?.Invoke()));
         _architectCommit = ArchitectButton("COMMIT", () => ArchitectCommit?.Invoke());
         DesignSystem.StyleButton(_architectCommit, DesignSystem.EmberButton(), DesignSystem.EmberButtonPressed(), DesignSystem.OnEmber);
-        row.AddChild(_architectCommit);
-
-        row.AddChild(ArchitectButton("EXIT", () => ArchitectExit?.Invoke()));
+        actions.AddChild(_architectCommit);
+        actions.AddChild(ArchitectButton("EXIT", () => ArchitectExit?.Invoke()));
+        column.AddChild(actions);
 
         _hudLayer.AddChild(_architectBar);
     }
@@ -198,10 +202,28 @@ public partial class SurvivalHud : Control
         var button = new Button { Text = text, CustomMinimumSize = new Vector2(56, 44) };
         if (DesignSystem.Display is { } font) button.AddThemeFontOverride("font", font);
         button.AddThemeFontSizeOverride("font_size", 10);
-        DesignSystem.StyleButton(button, DesignSystem.Slot(), DesignSystem.Slot(selected: true), DesignSystem.Parchment);
+        StylePaletteButton(button, selected: false);
         button.Pressed += pressed;
         return button;
     }
+
+    private static void StylePaletteButton(Button button, bool selected) =>
+        DesignSystem.StyleButton(button, DesignSystem.Slot(selected), DesignSystem.Slot(selected: true),
+            selected ? DesignSystem.OnEmber : DesignSystem.Parchment);
+
+    /// <summary>Short palette labels for the piece kinds.</summary>
+    private static string PieceLabel(BuildPieceKind kind) => kind switch
+    {
+        BuildPieceKind.Foundation => "BASE",
+        BuildPieceKind.Wall => "WALL",
+        BuildPieceKind.Doorway => "DOOR",
+        BuildPieceKind.Window => "WINDOW",
+        BuildPieceKind.Pillar => "POST",
+        BuildPieceKind.Roof => "ROOF",
+        _ => kind.ToString().ToUpperInvariant(),
+    };
+
+    private static string MaterialLabel(BuildMaterial material) => material.ToString().ToUpperInvariant();
 
     /// <summary>The buildground actions shown when the player stands at an owned site:
     /// stock it from the pouch, or strike its next piece up.</summary>
@@ -229,19 +251,33 @@ public partial class SurvivalHud : Control
         _hudLayer.AddChild(_siteActions);
     }
 
-    /// <summary>Shows or hides the architect bar, and hides the hotbar while designing
-    /// so the two never overlap at the bottom of the screen.</summary>
+    /// <summary>Shows or hides the architect palette, and hides the hotbar and move
+    /// stick while designing so nothing competes with the plan or the free camera.</summary>
     public void SetBuildMode(bool on)
     {
         _architectBar.Visible = on;
         _hotbar.Visible = !on;
+        _joystick.Visible = !on;
         if (on) { _gatherPrompt.Visible = false; _siteActions.Visible = false; }
     }
 
-    /// <summary>Refreshes the design bar from the current piece, material and plan cost.</summary>
-    public void UpdateArchitect(string kind, string material, IReadOnlyList<MaterialCost> bom, bool valid)
+    /// <summary>Refreshes the palette from the current piece, material and plan cost:
+    /// the chosen piece lights up, its material chips are rebuilt, and the bill of
+    /// materials reads what the build will cost.</summary>
+    public void UpdateArchitect(BuildPieceKind kind, BuildMaterial material, IReadOnlyList<MaterialCost> bom, bool valid)
     {
-        _architectPiece.Text = $"{kind} · {material}";
+        foreach (var (pieceKind, button) in _pieceButtons)
+            StylePaletteButton(button, pieceKind == kind);
+
+        foreach (var child in _materialRow.GetChildren()) child.QueueFree();
+        foreach (var choice in StructureCatalog.MaterialsFor(kind))
+        {
+            var picked = choice;
+            var chip = ArchitectButton(MaterialLabel(choice), () => ArchitectSelectMaterial?.Invoke(picked));
+            StylePaletteButton(chip, choice == material);
+            _materialRow.AddChild(chip);
+        }
+
         if (bom.Count == 0)
         {
             _architectBom.Text = "EMPTY PLAN — TAP TO PLACE";
