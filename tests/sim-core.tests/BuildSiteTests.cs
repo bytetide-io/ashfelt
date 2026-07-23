@@ -169,6 +169,22 @@ public class BuildSiteTests
     }
 
     [Fact]
+    public void ABuiltRoof_SheltersItsCell_ButAPendingOneDoesNot()
+    {
+        var site = new BuildSite(1, Guid.NewGuid(), Hut());
+
+        // Nothing built yet: the planned roof shelters no one.
+        Assert.False(site.HasBuiltRoofOver(0, 0));
+
+        DepositAll(site);
+        BuildToExhaustion(site);
+
+        // The whole hut, roof included, now stands — the cell is sheltered.
+        Assert.True(site.HasBuiltRoofOver(0, 0));
+        Assert.False(site.HasBuiltRoofOver(1, 0)); // a neighbouring cell is not
+    }
+
+    [Fact]
     public void LoadBuilt_RestoresConstructionState_FromStorage()
     {
         var pieces = Hut();

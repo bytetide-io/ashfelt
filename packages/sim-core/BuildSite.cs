@@ -43,6 +43,22 @@ public sealed class BuildSite
     public IReadOnlyDictionary<ItemId, int> Storage => _storage;
 
     public bool IsBuilt(PieceSlot slot) => _built.Contains(slot);
+
+    /// <summary>
+    /// True when a built roof covers cell (<paramref name="x"/>, <paramref name="y"/>)
+    /// at any storey — so standing under it counts as sheltered. This is what earns
+    /// a finished building its keep: a roof answers the night's cold the way a
+    /// campfire does, but for a whole footprint rather than a radius. A pending
+    /// (unbuilt) roof shelters no one, so the player must actually raise it.
+    /// </summary>
+    public bool HasBuiltRoofOver(int x, int y)
+    {
+        foreach (var slot in _built)
+            if (slot.Layer == PieceLayer.Cover && slot.X == x && slot.Y == y)
+                return true;
+        return false;
+    }
+
     public int PieceCount => _pieces.Count;
     public int BuiltCount => _built.Count;
     public bool IsComplete => _built.Count == _pieces.Count;

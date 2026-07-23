@@ -535,7 +535,9 @@ while (!shutdown.IsSet)
     bool daytime = WorldClock.IsDaytime(WorldClock.TimeOfDay(tick));
     foreach (var player in players.Values)
     {
-        bool warm = daytime || world.HasWarmthNear(player.Position);
+        // Warm in daylight, by a lit campfire, or under the roof of a built
+        // shelter — so raising a roof is a real answer to the night, not decor.
+        bool warm = daytime || world.HasWarmthNear(player.Position) || ShelteredAt(player.Position);
         player.AdvanceSurvival(1, warm);
     }
 
@@ -620,6 +622,18 @@ static void WriteStructurePlaced(NetDataWriter data, Structure structure)
 // Whether the terrain under a cell can carry a foundation — the same walkability
 // gate the legacy placement path uses, so a building rests where a wall could.
 bool GroundBuildable(int x, int y) => TerrainGenerator.IsWalkable(world.TileAt(x, y));
+
+// Whether a built roof shelters the player's cell — the survival payoff of
+// finishing a building, checked each tick alongside the campfire warmth radius.
+bool ShelteredAt(Vec3 position)
+{
+    double metres = TerrainGenerator.TileMetres;
+    int cellX = (int)Math.Floor(position.X / metres);
+    int cellY = (int)Math.Floor(position.Z / metres);
+    foreach (var site in buildSites.Values)
+        if (site.HasBuiltRoofOver(cellX, cellY)) return true;
+    return false;
+}
 
 // The whole of one build site, sent only to its owner: the pending hologram, the
 // built pieces, and the on-site stockpile. The client rebuilds its private view
