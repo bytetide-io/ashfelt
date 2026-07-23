@@ -61,6 +61,17 @@ the `WorldConnection` node for LAN or VPS testing.
 
 WASD/arrows and the mouse work in the editor for desktop testing.
 
+## Contributing
+
+Ashfall is open source and contributions are welcome. Start with
+[**CONTRIBUTING.md**](CONTRIBUTING.md) — it covers the vision and invariants you
+need to respect, the fork → PR workflow, and where to find work to pick up.
+
+- [Development setup](docs/development-setup.md) — build, run, and test locally.
+- [Codebase tour](docs/codebase-tour.md) — what's where and how to change it.
+- [Documentation index](docs/README.md) — the map to every doc.
+- [Code of Conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md)
+
 ## Status
 
 **Phase 0 complete** — monorepo, deterministic terrain generator, UDP
