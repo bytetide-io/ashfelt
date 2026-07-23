@@ -31,14 +31,47 @@ public partial class World3D : Node3D
     private readonly List<MultiMesh> _foliage = new();
 
     /// <summary>One drawn instance inside a MultiMesh, with the full-size transform
-    /// it was built at. A harvested tile's tree or shrub shrinks toward nothing as
-    /// it is struck and collapses out of view when finally felled — both scale the
-    /// stored original, so repeated strikes never compound.</summary>
+    /// it was built at. Harvest animations rotate this stored original around the
+    /// tree's base, so repeated strikes never compound.</summary>
     private readonly record struct FoliageRef(MultiMesh Mesh, int Index, Transform3D Original);
 
     /// <summary>Every foliage instance a tile owns, so a harvest strike or felling
     /// touches exactly the visuals for that tile and nothing else.</summary>
     private readonly Dictionary<(int, int), List<FoliageRef>> _foliageByTile = new();
+
+    /// <summary>Ground point at the foot of each tree, the hinge its trunk pivots
+    /// about as it is chopped and topples. Only forest tiles have an entry.</summary>
+    private readonly Dictionary<(int, int), Vector3> _treeBase = new();
+
+    /// <summary>
+    /// A tree leaning under the axe. Each strike deepens the lean about the base
+    /// hinge; the felling strike drives it all the way over, and once flat the
+    /// trunk and canopy are hidden. The transform is rebuilt from each instance's
+    /// stored original every frame, so the motion never accumulates error.
+    /// </summary>
+    private sealed class TreeFall
+    {
+        public required IReadOnlyList<FoliageRef> Refs;
+        public required Vector3 Hinge;
+        public required Vector3 Axis;
+        public float Angle;
+        public float TargetAngle;
+        public bool Felled;
+    }
+
+    private readonly Dictionary<(int, int), TreeFall> _treeFalls = new();
+
+    /// <summary>Lean the trunk reaches at the last cut before it falls — a visible
+    /// but recoverable-looking tilt, so the final topple still reads as a topple.</summary>
+    private const float MaxChopLean = 0.28f;
+
+    /// <summary>The felled tree lies flat: a quarter turn about its base hinge.</summary>
+    private const float FullFallAngle = Mathf.Pi / 2f;
+
+    /// <summary>How fast a tree swings toward its current lean/fall target, in
+    /// radians per second. Fast enough that a chop jolts, slow enough that the
+    /// final fall reads as a fall rather than a snap.</summary>
+    private const float TreeFallSpeed = 3.2f;
 
     /// <summary>Client-side tile diffs, mirroring the server's seed+diffs rule: a
     /// harvested tile reverts here too, so the gather reticle and tap both read the
@@ -157,6 +190,8 @@ public partial class World3D : Node3D
         _worldRoot.QueueFree();
         _foliage.Clear();
         _foliageByTile.Clear();
+        _treeBase.Clear();
+        _treeFalls.Clear();
         _tileDiffs.Clear();
         _structures.Clear();
         _remotes.Clear();
@@ -174,6 +209,8 @@ public partial class World3D : Node3D
         if (_clockStarted) AdvanceClock(delta);
 
         if (!_built) return;
+
+        AdvanceTreeFalls(delta);
 
         _reportTimer += delta;
         double interval = 1.0 / Proto.Tuning.ClientStateHz;
@@ -248,6 +285,7 @@ public partial class World3D : Node3D
         var trunks = new List<Transform3D>();
         var canopies = new List<Transform3D>();
         var treeTiles = new List<(int, int)>();
+        var treeBases = new List<Vector3>();
         var tufts = new List<Transform3D>();
         var tuftTiles = new List<(int, int)>();
         var berries = new List<Transform3D>();
@@ -259,7 +297,7 @@ public partial class World3D : Node3D
             {
                 var coord = new ChunkCoord(cx, cy);
                 chunks.AddChild(TerrainMesher.Build(_terrain, coord, ground));
-                CollectTrees(coord, trunks, canopies, treeTiles);
+                CollectTrees(coord, trunks, canopies, treeTiles, treeBases);
                 CollectShrubs(coord, tufts, tuftTiles);
                 CollectBerryBushes(coord, berries, berryTiles);
             }
@@ -287,6 +325,7 @@ public partial class World3D : Node3D
         {
             RegisterFoliage(treeTiles[i], trunkFoliage.Multimesh, i);
             RegisterFoliage(treeTiles[i], canopyFoliage.Multimesh, i);
+            _treeBase[treeTiles[i]] = treeBases[i];
         }
 
         var tuftFoliage = BuildFoliage(tufts, new SphereMesh
@@ -323,7 +362,8 @@ public partial class World3D : Node3D
     /// gameplay data did not change, only how it is drawn.
     /// </summary>
     private void CollectTrees(
-        ChunkCoord coord, List<Transform3D> trunks, List<Transform3D> canopies, List<(int, int)> tiles)
+        ChunkCoord coord, List<Transform3D> trunks, List<Transform3D> canopies,
+        List<(int, int)> tiles, List<Vector3> bases)
     {
         int size = TerrainGenerator.ChunkSize;
         double metres = TerrainGenerator.TileMetres;
@@ -353,6 +393,8 @@ public partial class World3D : Node3D
                 trunks.Add(new Transform3D(basis, root + Vector3.Up * 1.6f * scale));
                 canopies.Add(new Transform3D(basis, root + Vector3.Up * 4.2f * scale));
                 tiles.Add((wx, wy));
+                // The hinge the tree tips about: the foot of the trunk, on the ground.
+                bases.Add(root);
             }
         }
     }
@@ -559,46 +601,126 @@ public partial class World3D : Node3D
     }
 
     /// <summary>
-    /// Applies the server's authoritative tile change: when a harvested tile
-    /// reverts to bare ground, collapse the tree or shrub that stood on it. The
-    /// MultiMesh instance can't be deleted cheaply, so it is scaled to nothing —
-    /// invisible, and still just two draw calls.
+    /// Applies the server's authoritative tile change. A felled tree topples the
+    /// rest of the way over its base hinge — it does not blink out; the fall
+    /// animation hides it once it lies flat. A plucked shrub or berry bush, which
+    /// never leaned, simply collapses out of view.
     /// </summary>
     private void OnTileChanged(int tileX, int tileY, int tile)
     {
         if (!_built) return;
+        var key = (tileX, tileY);
 
         // Record the diff so the reticle and tap stop treating this tile as the
         // node it used to be — the fix for re-tapping a felled stump forever.
-        _tileDiffs[(tileX, tileY)] = (TileType)tile;
+        _tileDiffs[key] = (TileType)tile;
 
-        if (!_foliageByTile.TryGetValue((tileX, tileY), out var refs)) return;
+        if (_treeBase.ContainsKey(key) && EnsureTreeFall(key) is { } fall)
+        {
+            fall.TargetAngle = FullFallAngle;
+            fall.Felled = true;
+            return;
+        }
 
-        var collapsed = new Basis(Vector3.Zero, Vector3.Zero, Vector3.Zero);
-        foreach (var reference in refs)
-            reference.Mesh.SetInstanceTransform(
-                reference.Index, new Transform3D(collapsed, reference.Original.Origin));
-        _foliageByTile.Remove((tileX, tileY));
+        CollapseFoliage(key);
     }
 
     /// <summary>
-    /// A node was struck but not yet felled: shrink its foliage toward nothing in
-    /// proportion to the strikes left, so a tree visibly comes down over several
-    /// taps instead of vanishing in one. Scaling the stored original keeps repeated
-    /// strikes from compounding.
+    /// A node was struck but not yet felled. For a tree this deepens the lean about
+    /// its base hinge in proportion to the strikes landed, so it visibly leans
+    /// further with each cut before the felling blow brings it down. Nodes with no
+    /// standing foliage (rock) have nothing to lean, and are simply ignored here.
     /// </summary>
     private void OnHarvestProgress(int tileX, int tileY, int strikesLeft, int strikesTotal)
     {
         if (!_built || strikesTotal <= 0) return;
-        if (!_foliageByTile.TryGetValue((tileX, tileY), out var refs)) return;
+        if (EnsureTreeFall((tileX, tileY)) is not { } fall) return;
 
-        float factor = Mathf.Clamp(strikesLeft / (float)strikesTotal, 0f, 1f);
-        foreach (var reference in refs)
+        int struck = strikesTotal - strikesLeft;
+        float progress = Mathf.Clamp(struck / (float)strikesTotal, 0f, 1f);
+        fall.TargetAngle = progress * MaxChopLean;
+    }
+
+    /// <summary>
+    /// The active fall for a tree tile, creating it on first use. Returns null for a
+    /// tile that is not a tree (no hinge) or whose foliage is already gone. Once a
+    /// fall exists it owns the tile's foliage instances, so they leave
+    /// <see cref="_foliageByTile"/> and animate only through the fall.
+    /// </summary>
+    private TreeFall? EnsureTreeFall((int X, int Y) tile)
+    {
+        if (_treeFalls.TryGetValue(tile, out var existing)) return existing;
+        if (!_treeBase.TryGetValue(tile, out var hinge)) return null;
+        if (!_foliageByTile.TryGetValue(tile, out var refs)) return null;
+
+        // Deterministic tip direction so a given tree always falls the same way,
+        // but neighbours fall in varied directions rather than all one way.
+        uint hash = SimCore.Noise.Hash(tile.X, tile.Y, Seed ^ 0xFA11u);
+        float heading = (hash & 0xFFFF) / 65535f * Mathf.Tau;
+
+        var fall = new TreeFall
         {
-            var original = reference.Original;
-            var shrunk = new Transform3D(original.Basis.Scaled(Vector3.One * factor), original.Origin);
-            reference.Mesh.SetInstanceTransform(reference.Index, shrunk);
+            Refs = new List<FoliageRef>(refs),
+            Hinge = hinge,
+            Axis = new Vector3(Mathf.Cos(heading), 0f, Mathf.Sin(heading)),
+        };
+        _treeFalls[tile] = fall;
+        _foliageByTile.Remove(tile);
+        return fall;
+    }
+
+    /// <summary>Eases every leaning tree toward its target angle and, once a felled
+    /// tree is flat on the ground, hides it. Driven from <see cref="_Process"/>.</summary>
+    private void AdvanceTreeFalls(double delta)
+    {
+        if (_treeFalls.Count == 0) return;
+
+        List<(int, int)>? finished = null;
+        foreach (var (tile, fall) in _treeFalls)
+        {
+            if (!Mathf.IsEqualApprox(fall.Angle, fall.TargetAngle))
+            {
+                fall.Angle = Mathf.MoveToward(fall.Angle, fall.TargetAngle, (float)delta * TreeFallSpeed);
+                ApplyLean(fall);
+            }
+
+            if (fall.Felled && Mathf.IsEqualApprox(fall.Angle, fall.TargetAngle))
+            {
+                HideFoliage(fall.Refs);
+                (finished ??= new List<(int, int)>()).Add(tile);
+            }
         }
+
+        if (finished is null) return;
+        foreach (var tile in finished) _treeFalls.Remove(tile);
+    }
+
+    /// <summary>Rotates a tree's trunk and canopy rigidly about its base hinge, so
+    /// the whole tree tips as one piece rather than each part rotating in place.</summary>
+    private static void ApplyLean(TreeFall fall)
+    {
+        var rotation = new Basis(fall.Axis, fall.Angle);
+        foreach (var (mesh, index, original) in fall.Refs)
+        {
+            Vector3 origin = fall.Hinge + rotation * (original.Origin - fall.Hinge);
+            mesh.SetInstanceTransform(index, new Transform3D(rotation * original.Basis, origin));
+        }
+    }
+
+    private void CollapseFoliage((int, int) tile)
+    {
+        if (!_foliageByTile.TryGetValue(tile, out var refs)) return;
+        HideFoliage(refs);
+        _foliageByTile.Remove(tile);
+    }
+
+    /// <summary>A MultiMesh instance can't be deleted cheaply, so a gone node is
+    /// scaled to nothing — invisible, still just two draw calls.</summary>
+    private static void HideFoliage(IReadOnlyList<FoliageRef> refs)
+    {
+        var collapsed = new Basis(Vector3.Zero, Vector3.Zero, Vector3.Zero);
+        foreach (var (mesh, index, original) in refs)
+            mesh.SetInstanceTransform(index, new Transform3D(collapsed, original.Origin));
     }
 
     /// <summary>How far ahead of the player a structure is placed, in tiles.</summary>
