@@ -20,6 +20,14 @@ public partial class PlayerBody : CharacterBody3D
 
     private float _gravity = 24.0f;
 
+    /// <summary>Touch movement stick; null in the editor where the keyboard drives.</summary>
+    public VirtualJoystick? MoveStick { get; set; }
+
+    private bool _jumpQueued;
+
+    /// <summary>A touch jump button asks for one jump, consumed next time grounded.</summary>
+    public void QueueJump() => _jumpQueued = true;
+
     /// <summary>Facing in radians, reported to the server for remote rendering.</summary>
     public float Facing => _visual?.Rotation.Y ?? 0f;
 
@@ -43,14 +51,24 @@ public partial class PlayerBody : CharacterBody3D
     {
         var velocity = Velocity;
 
-        if (!IsOnFloor()) velocity.Y -= _gravity * (float)delta;
-        else if (Input.IsActionPressed("jump")) velocity.Y = JumpSpeed;
+        if (!IsOnFloor())
+        {
+            velocity.Y -= _gravity * (float)delta;
+        }
+        else if (Input.IsActionPressed("jump") || _jumpQueued)
+        {
+            velocity.Y = JumpSpeed;
+        }
+        _jumpQueued = false;
 
         // Input is interpreted in the camera's frame, then flattened, so
         // looking up or down never changes how fast you walk.
         // Argument order is (negX, posX, negY, posY), so "forward" must be the
         // positive Y action — otherwise W walks backwards.
-        var input = Input.GetVector("move_left", "move_right", "move_back", "move_forward");
+        // The touch stick adds to the keyboard so both work; clamp so combining
+        // them can never exceed full speed.
+        var input = (Input.GetVector("move_left", "move_right", "move_back", "move_forward")
+                     + (MoveStick?.Output ?? Vector2.Zero)).LimitLength(1f);
         var basis = _cameraPivot.GlobalBasis;
         var forward = -basis.Z with { Y = 0 };
         var right = basis.X with { Y = 0 };

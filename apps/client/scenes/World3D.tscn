@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://scripts/DebugCapture.cs" id="4_capture"]
 [ext_resource type="Script" path="res://scripts/WorldConnection.cs" id="5_conn"]
 [ext_resource type="Script" path="res://scripts/world3d/RemotePlayers.cs" id="6_remotes"]
+[ext_resource type="Script" path="res://scripts/world3d/SurvivalHud.cs" id="7_hud"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
 sky_horizon_color = Color(0.65, 0.72, 0.78, 1)
@@ -87,6 +88,13 @@ script = ExtResource("5_conn")
 script = ExtResource("6_remotes")
 
 [node name="Hud" type="CanvasLayer" parent="."]
+
+[node name="SurvivalHud" type="Control" parent="Hud"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("7_hud")
 
 [node name="Status" type="Label" parent="Hud"]
 anchors_preset = 8

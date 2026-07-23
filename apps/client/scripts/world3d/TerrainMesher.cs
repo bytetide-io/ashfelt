@@ -18,6 +18,7 @@ public static class TerrainMesher
     private static readonly Color GrassColour = new("4a7c40");
     private static readonly Color ForestColour = new("3a5f34");
     private static readonly Color RockColour = new("6e6a63");
+    private static readonly Color ShrubColour = new("5c8a3c");
 
     private static Color ColourOf(TileType tile) => tile switch
     {
@@ -26,6 +27,7 @@ public static class TerrainMesher
         TileType.Sand => SandColour,
         TileType.Grass => GrassColour,
         TileType.Forest => ForestColour,
+        TileType.Shrub => ShrubColour,
         _ => RockColour,
     };
 

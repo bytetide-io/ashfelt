@@ -46,6 +46,15 @@ public partial class RemotePlayers : Node3D
         if (_bodies.Remove(id, out var body)) body.QueueFree();
     }
 
+    /// <summary>Drop everyone — used when a voyage leaves one world for another.</summary>
+    public void Clear()
+    {
+        foreach (var body in _bodies.Values) body.QueueFree();
+        _bodies.Clear();
+        _targets.Clear();
+        _yaws.Clear();
+    }
+
     public override void _Process(double delta)
     {
         float weight = Mathf.Min(1f, (float)delta * 12f);
