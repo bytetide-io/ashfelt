@@ -22,6 +22,12 @@ public sealed class Player
     public int Id { get; }
     public NetPeer Peer { get; }
 
+    /// <summary>
+    /// The device UUID this player's character is stored under in the gateway.
+    /// Unknown until the Hello handshake arrives, so it is settable.
+    /// </summary>
+    public Guid CharacterId { get; set; }
+
     /// <summary>Last accepted position, in metres.</summary>
     public Vec3 Position { get; private set; }
 
@@ -36,9 +42,81 @@ public sealed class Player
     public Dictionary<ItemId, int> Inventory { get; } = new();
     public bool InventoryDirty { get; set; }
 
+    /// <summary>Authoritative survival meters. Spawns full; drains on the tick.</summary>
+    public SurvivalRules.SurvivalState Survival { get; private set; } = SurvivalRules.SurvivalState.Full;
+
     public void Give(ItemId item, int amount)
     {
         Inventory[item] = Inventory.GetValueOrDefault(item) + amount;
+        InventoryDirty = true;
+    }
+
+    /// <summary>True when the player holds at least one of <paramref name="item"/>.</summary>
+    public bool Has(ItemId item, int amount = 1) => Inventory.GetValueOrDefault(item) >= amount;
+
+    /// <summary>
+    /// Removes one of <paramref name="item"/>. The caller has already checked the
+    /// player holds it, so an empty stack here would be a server-side invariant
+    /// violation — fail loudly rather than clamp.
+    /// </summary>
+    public void ConsumeOne(ItemId item)
+    {
+        int remaining = Inventory.GetValueOrDefault(item) - 1;
+        if (remaining < 0)
+            throw new InvalidOperationException(
+                $"Player {Id} spent {item} they did not hold.");
+
+        if (remaining == 0) Inventory.Remove(item);
+        else Inventory[item] = remaining;
+        InventoryDirty = true;
+    }
+
+    /// <summary>Drains survival meters by whole ticks using the shared rules.</summary>
+    public void AdvanceSurvival(int ticks) => Survival = SurvivalRules.Advance(Survival, ticks);
+
+    /// <summary>
+    /// Seeds this player from a character loaded out of the gateway: its stored
+    /// inventory and survival meters replace the defaults. Called once at Hello.
+    /// </summary>
+    public void LoadCharacter(CharacterState character)
+    {
+        Inventory.Clear();
+        foreach (var (name, amount) in character.Inventory)
+        {
+            if (amount > 0 && Enum.TryParse<ItemId>(name, out var item))
+                Inventory[item] = amount;
+        }
+        Survival = SurvivalRules.FromPoints(character.Hunger, character.Stamina, character.Health);
+        InventoryDirty = true;
+    }
+
+    /// <summary>Snapshots the persistent character state for saving to the gateway.</summary>
+    public CharacterState ToCharacterState() => new()
+    {
+        Inventory = Inventory.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value),
+        Hunger = Survival.HungerPoints,
+        Stamina = Survival.StaminaPoints,
+        Health = Survival.HealthPoints,
+    };
+
+    /// <summary>
+    /// Folds crafting deltas into the inventory: negative entries consume inputs,
+    /// the positive entry adds the output. The caller has already checked the
+    /// craft is affordable, so a negative result would be a server-side invariant
+    /// violation — fail loudly rather than clamp.
+    /// </summary>
+    public void ApplyCraft(IReadOnlyList<CraftingRules.ItemDelta> deltas)
+    {
+        foreach (var delta in deltas)
+        {
+            int remaining = Inventory.GetValueOrDefault(delta.Item) + delta.Change;
+            if (remaining < 0)
+                throw new InvalidOperationException(
+                    $"Craft consumed more {delta.Item} than player {Id} held.");
+
+            if (remaining == 0) Inventory.Remove(delta.Item);
+            else Inventory[delta.Item] = remaining;
+        }
         InventoryDirty = true;
     }
 

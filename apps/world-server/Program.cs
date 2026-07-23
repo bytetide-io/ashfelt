@@ -9,15 +9,19 @@ uint seed = uint.TryParse(Environment.GetEnvironmentVariable("ASHFALL_SEED"), ou
 string key = Environment.GetEnvironmentVariable("ASHFALL_CONNECT_KEY") ?? "ashfall";
 string worldId = Environment.GetEnvironmentVariable("ASHFALL_WORLD_ID") ?? "continent-a";
 string? conn = Environment.GetEnvironmentVariable("ASHFALL_DB");
+string gatewayUrl = Environment.GetEnvironmentVariable("ASHFALL_GATEWAY") ?? "http://127.0.0.1:5041";
 
+var gateway = new GatewayClient(gatewayUrl);
 var world = new World(seed);
 await using var store = await WorldStore.OpenAsync(conn, worldId, seed);
 int restored = await store.LoadDiffsAsync(world);
-Console.WriteLine($"[world] seed={seed} restored {restored} diff(s)");
+int structures = await store.LoadStructuresAsync(world);
+Console.WriteLine($"[world] seed={seed} restored {restored} diff(s), {structures} structure(s)");
 
 var players = new Dictionary<NetPeer, Player>();
 var writer = new NetDataWriter();
 int nextPlayerId = 1;
+long tick = 0;
 
 var listener = new EventBasedNetListener();
 var server = new NetManager(listener) { UpdateTime = 15 };
@@ -42,6 +46,23 @@ listener.PeerDisconnectedEvent += (peer, info) =>
     if (!players.Remove(peer, out var player)) return;
     Console.WriteLine($"[world] player {player.Id} disconnected ({info.Reason})");
 
+    // Save the character back to the gateway off the packet loop so a slow
+    // write never stalls the players still in the world. The state is snapshot
+    // now, synchronously, so the async write sees a stable copy.
+    if (player.CharacterId != Guid.Empty)
+    {
+        var characterId = player.CharacterId;
+        var snapshot = player.ToCharacterState();
+        _ = Task.Run(async () =>
+        {
+            try { await gateway.SaveCharacterAsync(characterId, snapshot); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[world] character save failed for {characterId}: {ex.Message}");
+            }
+        });
+    }
+
     writer.Reset();
     writer.Put((byte)MessageId.PlayerLeft);
     writer.Put(player.Id);
@@ -65,6 +86,48 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                 break;
             }
 
+            var uuidBytes = new byte[16];
+            reader.GetBytes(uuidBytes, 16);
+            player.CharacterId = new Guid(uuidBytes);
+
+            string ticketText = reader.GetString();
+
+            // A voyage arrival carries a ticket: this server must claim ownership
+            // before it may load the character. A failed claim (expired, forged,
+            // already used) means the character is not ours to load — reject the
+            // join rather than risk two worlds owning one character. A normal join
+            // has an empty ticket and loads as before.
+            if (ticketText.Length > 0)
+            {
+                bool claimed = Guid.TryParse(ticketText, out var ticket)
+                    && gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId)
+                        .GetAwaiter().GetResult();
+                if (!claimed)
+                {
+                    Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
+                    peer.Disconnect();
+                    break;
+                }
+                Console.WriteLine($"[world] claimed voyaging character {player.CharacterId}");
+            }
+
+            // Load happens at Hello (not connect) because the UUID is only known
+            // now. Blocking the loop here is deliberate: joining is inherently a
+            // wait, and seeding synchronously keeps the inventory the tick loop
+            // reads free of cross-thread mutation. Saves, by contrast, are
+            // fire-and-forget so a leaving player never stalls the others.
+            try
+            {
+                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
+                if (character is not null) player.LoadCharacter(character);
+                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
+                                  (character is null ? "is new" : "loaded"));
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[world] character load failed for {player.CharacterId}: {ex.Message}");
+            }
+
             writer.Reset();
             writer.Put((byte)MessageId.Welcome);
             writer.Put(ProtocolVersion.Current);
@@ -76,6 +139,15 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             writer.Put((float)player.Position.Z);
             peer.Send(writer, DeliveryMethod.ReliableOrdered);
             player.InventoryDirty = true;
+
+            // Backfill the already-built world so a joining player sees every
+            // structure, not just the ones placed after they arrived.
+            foreach (var structure in world.Structures)
+            {
+                writer.Reset();
+                WriteStructurePlaced(writer, structure);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+            }
             break;
         }
 
@@ -146,6 +218,105 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             break;
         }
 
+        case MessageId.CraftRequest:
+        {
+            var output = (ItemId)reader.GetByte();
+            var craft = CraftingRules.Evaluate(player.Inventory, output);
+            if (!craft.Allowed) break;
+
+            player.ApplyCraft(craft.Deltas);
+            Console.WriteLine($"[world] player {player.Id} crafted {output}");
+            break;
+        }
+
+        case MessageId.PlaceRequest:
+        {
+            var kind = (ItemId)reader.GetByte();
+            int tx = reader.GetInt(), ty = reader.GetInt();
+
+            if (!player.Has(kind))
+            {
+                Console.WriteLine($"[world] player {player.Id} lacks {kind} to place");
+                break;
+            }
+            if (!player.IsWithinReach(tx, ty))
+            {
+                Console.WriteLine($"[world] player {player.Id} place out of range at ({tx},{ty})");
+                break;
+            }
+
+            var placement = world.TryPlace(tx, ty, kind);
+            if (!placement.Allowed) break;
+
+            player.ConsumeOne(kind);
+            // Fire-and-forget the write: the structure is already authoritative
+            // in memory, exactly as with harvest diffs.
+            _ = store.SaveStructureAsync(placement.Structure);
+
+            writer.Reset();
+            WriteStructurePlaced(writer, placement.Structure);
+            Broadcast(writer);
+
+            Console.WriteLine($"[world] player {player.Id} placed {kind} at ({tx},{ty})");
+            break;
+        }
+
+        case MessageId.RequestRelease:
+        {
+            string targetWorldId = reader.GetString();
+
+            void Deny(string reason)
+            {
+                Console.WriteLine($"[world] release denied for player {player.Id}: {reason}");
+                writer.Reset();
+                writer.Put((byte)MessageId.ReleaseDenied);
+                writer.Put(reason);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+            }
+
+            if (player.CharacterId == Guid.Empty) { Deny("no character"); break; }
+
+            // Save synchronously first: the gateway must hold the authoritative
+            // state before any world can claim it, or a voyage could load stale
+            // inventory. Only then mint the ticket. Blocking the loop is deliberate
+            // — a release is a rare, deliberate act, not a per-tick path.
+            VoyageGrant? grant;
+            try
+            {
+                gateway.SaveCharacterAsync(player.CharacterId, player.ToCharacterState())
+                    .GetAwaiter().GetResult();
+                grant = gateway.RequestVoyageAsync(player.CharacterId, worldId, targetWorldId)
+                    .GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Deny($"gateway unreachable: {ex.Message}");
+                break;
+            }
+
+            if (grant is null) { Deny($"target '{targetWorldId}' unavailable"); break; }
+
+            // Grant, then relinquish: tell the client where to go, then remove the
+            // entity so this server no longer owns it. The gateway already cleared
+            // ownership to in-transit, so the two states never contradict.
+            writer.Reset();
+            writer.Put((byte)MessageId.ReleaseGranted);
+            writer.Put(grant.TargetHost);
+            writer.Put(grant.TargetPort);
+            writer.Put(grant.Ticket.ToString());
+            peer.Send(writer, DeliveryMethod.ReliableOrdered);
+
+            players.Remove(peer);
+            Console.WriteLine($"[world] released player {player.Id} ({player.CharacterId}) " +
+                              $"to {targetWorldId} at {grant.TargetHost}:{grant.TargetPort}");
+
+            writer.Reset();
+            writer.Put((byte)MessageId.PlayerLeft);
+            writer.Put(player.Id);
+            Broadcast(writer, exclude: peer);
+            break;
+        }
+
         default:
             Console.WriteLine($"[world] unhandled message {id}");
             break;
@@ -170,6 +341,9 @@ int tickMs = 1000 / Tuning.TicksPerSecond;
 while (!shutdown.IsSet)
 {
     server.PollEvents();
+
+    tick++;
+    foreach (var player in players.Values) player.AdvanceSurvival(1);
 
     if (players.Count > 0)
     {
@@ -202,6 +376,24 @@ while (!shutdown.IsSet)
             }
             player.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
         }
+
+        if (tick % Tuning.StatsHeartbeatTicks == 0)
+        {
+            float timeOfDay = (float)WorldClock.TimeOfDay(tick);
+            foreach (var player in players.Values)
+            {
+                var survival = player.Survival;
+                writer.Reset();
+                writer.Put((byte)MessageId.StatsUpdate);
+                writer.Put(survival.HungerPoints);
+                writer.Put(survival.StaminaPoints);
+                writer.Put(survival.HealthPoints);
+                writer.Put(timeOfDay);
+                // Unreliable: the next heartbeat replaces a dropped one, and the
+                // client interpolates time-of-day locally between beats.
+                player.Peer.Send(writer, DeliveryMethod.Unreliable);
+            }
+        }
     }
 
     Thread.Sleep(tickMs);
@@ -217,4 +409,13 @@ void Broadcast(NetDataWriter data, NetPeer? exclude = null,
     foreach (var peer in players.Keys)
         if (peer != exclude)
             peer.Send(data, method);
+}
+
+static void WriteStructurePlaced(NetDataWriter data, Structure structure)
+{
+    data.Put((byte)MessageId.StructurePlaced);
+    data.Put(structure.Id);
+    data.Put((byte)structure.Kind);
+    data.Put(structure.TileX);
+    data.Put(structure.TileY);
 }

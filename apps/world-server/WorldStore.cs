@@ -1,3 +1,4 @@
+using Ashfall.Proto;
 using Ashfall.SimCore;
 using Npgsql;
 
@@ -92,6 +93,54 @@ public sealed class WorldStore : IAsyncDisposable
         cmd.Parameters.AddWithValue(lx);
         cmd.Parameters.AddWithValue(ly);
         cmd.Parameters.AddWithValue((short)tile);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Replays every stored structure into the world. Called once at startup.</summary>
+    public async Task<int> LoadStructuresAsync(World world)
+    {
+        if (_db is null) return 0;
+
+        await using var cmd = _db.CreateCommand(
+            "SELECT id, tile_x, tile_y, kind FROM structure WHERE world_id = $1");
+        cmd.Parameters.AddWithValue(_worldId);
+
+        int count = 0;
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            long id = reader.GetInt64(0);
+            int tileX = reader.GetInt32(1);
+            int tileY = reader.GetInt32(2);
+            var kind = Enum.Parse<ItemId>(reader.GetString(3));
+            world.LoadStructure(new Structure(id, tileX, tileY, kind));
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// Writes a placed structure. The in-memory <see cref="Structure.Id"/> is the
+    /// authority, so it is inserted explicitly rather than left to the sequence,
+    /// keeping the id a client already saw stable across a restart.
+    /// </summary>
+    public async Task SaveStructureAsync(Structure structure)
+    {
+        if (_db is null) return;
+
+        var chunk = World.ChunkOf(structure.TileX, structure.TileY);
+        await using var cmd = _db.CreateCommand("""
+            INSERT INTO structure (id, world_id, chunk_x, chunk_y, tile_x, tile_y, kind)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (id) DO NOTHING
+            """);
+        cmd.Parameters.AddWithValue(structure.Id);
+        cmd.Parameters.AddWithValue(_worldId);
+        cmd.Parameters.AddWithValue(chunk.X);
+        cmd.Parameters.AddWithValue(chunk.Y);
+        cmd.Parameters.AddWithValue(structure.TileX);
+        cmd.Parameters.AddWithValue(structure.TileY);
+        cmd.Parameters.AddWithValue(structure.Kind.ToString());
         await cmd.ExecuteNonQueryAsync();
     }
 
