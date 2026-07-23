@@ -45,9 +45,19 @@ the `WorldConnection` node for LAN or VPS testing.
 
 - **Left thumb-stick** — move (bottom-left). **Jump** button, bottom-right.
 - **Drag** anywhere else to pan the camera.
-- **Tap** a tree, rock or shrub within reach to gather wood, stone or fiber.
-- **Actions** button (bottom-right) opens the crafting/building sheet; the stick
-  hides while it is open. Craft and Build are separate tabs.
+- **Tap** a tree, rock, shrub or berry bush within reach to gather wood, stone,
+  fiber or berries.
+- **Hotbar** (bottom-centre) mirrors what you carry: tap a placeable to build it
+  in front of you, tap forage to eat it.
+- **Menu** button (top-right, ☰) opens the crafting/building sheet; the stick
+  hides while it is open. Craft, Build, Items and Travel are separate tabs. A
+  **day/night chip** sits beside it, and the survival meters read top-left.
+- **Items** tab lists what you carry; edible forage (berries) shows an **Eat**
+  button that restores hunger.
+- **Warmth** bar falls at night unless you stand near a lit **Campfire** (build
+  one from the Build tab); let it hit zero and your health bleeds.
+- Holding the right **tool** gathers more: an Axe boosts wood from trees, a
+  Pickaxe boosts stone from rock. Bare hands still work, just for less.
 
 WASD/arrows and the mouse work in the editor for desktop testing.
 
@@ -92,6 +102,39 @@ world-server, Postgres schema, CI.
 Still open in Phase 3: **voyage transfer** between world-servers (instant v1,
 see `docs/voyage-transfer.md`). Then Phase 4: item icons, audio, balancing and a
 mobile UI pass.
+
+**Foundation + Phase A (in progress)** — see `docs/gameplay-roadmap.md`:
+
+- a data-driven **item catalog** (`sim-core/ItemCatalog`): one `ItemDef` table
+  is the single source of item behaviour (name, stack, category, food value,
+  tool class, placeability). `HarvestRules` and `PlacementRules` are now lookups
+  over the catalog, not hand-listed switches — adding content is adding data.
+- a **food loop closes survival**: `BerryBush` tiles scattered in grassland are
+  foraged for `Berry`, and an `EatRequest` restores hunger via the shared
+  `SurvivalRules.Eat` — hunger is finally something a player can act against.
+- **night is a threat and the campfire earns its keep**: a fourth survival meter,
+  **warmth**, drains when a player is exposed at night and recovers in daylight
+  or within a campfire's warmth radius (`ItemDef.WarmthRadiusMetres`,
+  `World.HasWarmthNear`). An empty warmth meter bleeds health on top of any
+  starvation — so surviving the night means gathering by day and sheltering by
+  a fire after dark.
+
+**Design system + pixel-art pass (in progress)** — the client now dresses in the
+Ashfall design system (`scripts/ui/DesignSystem.cs`): the Ink/Ember palette,
+Silkscreen + Pixelify Sans fonts, and the chunky pixel controls. Item and
+resource **icons** are generated at runtime from the design's pixel-grid data
+(`scripts/ui/PixelIcons.cs`) — no hand-authored image files. A new **title
+screen** (`scenes/Title.tscn`) is the boot scene. The 3D world gets a
+**medium pixel-art look** where the pixels live *on the surfaces*: terrain and
+foliage carry procedural nearest-filtered pixel textures (ground grain, bark,
+leaf, berry — `PixelTextures.cs`) mapped in world space, so the ground you walk on
+and the trees are built of texels that stay welded to the geometry as you pan.
+On top of that the world renders into a low-resolution `SubViewport`
+(`stretch_shrink`, MSAA off) and is nearest-upscaled — which keeps the pixel size
+coherent *and* shades far fewer fragments, so the effect *raises* framerate rather
+than costing it. Flat toon-banded materials complete the look; the HUD renders
+outside the SubViewport so it stays crisp. The Silkscreen/Pixelify fonts live in
+`art/fonts/` and import on first editor open.
 
 See `docs/architecture.md` before adding anything; the invariants there
 (server-authoritative, seed+diffs, one shared sim library) are load-bearing.

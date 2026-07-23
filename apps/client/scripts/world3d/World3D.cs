@@ -17,6 +17,13 @@ public partial class World3D : Node3D
     /// <summary>Chunks generated around the origin for this first slice.</summary>
     [Export] public int Radius { get; set; } = 2;
 
+    /// <summary>
+    /// The HUD and its status label live outside the low-res SubViewport so they
+    /// render crisp at full resolution; the world reaches them by path.
+    /// </summary>
+    [Export] public NodePath HudPath { get; set; } = new();
+    [Export] public NodePath StatusPath { get; set; } = new();
+
     /// <summary>Seed supplied by the server on welcome.</summary>
     public uint Seed { get; private set; }
 
@@ -57,9 +64,10 @@ public partial class World3D : Node3D
     {
         _connection = GetNode<WorldConnection>("WorldConnection");
         _player = GetNode<PlayerBody>("Player");
-        _status = GetNode<Label>("Hud/Status");
+        _status = GetNode<Label>(StatusPath);
+        StyleStatus(_status);
         _remotes = GetNode<RemotePlayers>("RemotePlayers");
-        _hud = GetNode<SurvivalHud>("Hud/SurvivalHud");
+        _hud = GetNode<SurvivalHud>(HudPath);
         _sun = GetNode<DirectionalLight3D>("Sun");
         _environment = GetNode<WorldEnvironment>("WorldEnvironment");
         _hud.Bind(_connection);
@@ -76,7 +84,7 @@ public partial class World3D : Node3D
             CallDeferred(nameof(OnCorrected), position, (int)reason);
         _connection.PlayersUpdated += states => _remotes.Apply(states, _localId);
         _connection.PlayerLeft += id => CallDeferred(nameof(OnPlayerLeft), id);
-        _connection.StatsUpdated += (_, _, _, timeOfDay) =>
+        _connection.StatsUpdated += (_, _, _, _, timeOfDay) =>
             CallDeferred(nameof(SyncClock), timeOfDay);
         _connection.StructurePlaced += (id, kind, tx, ty) =>
             CallDeferred(nameof(OnStructurePlaced), id, (int)kind, tx, ty);
@@ -86,6 +94,15 @@ public partial class World3D : Node3D
     }
 
     private int _localId = -1;
+
+    /// <summary>Dress the connecting/notice label in the design's parchment-on-ink pill.</summary>
+    private static void StyleStatus(Label status)
+    {
+        if (DesignSystem.Display is { } font) status.AddThemeFontOverride("font", font);
+        status.AddThemeFontSizeOverride("font_size", DesignSystem.LabelSize);
+        status.AddThemeColorOverride("font_color", DesignSystem.Parchment);
+        status.AddThemeStyleboxOverride("normal", DesignSystem.Panel(new Color(DesignSystem.Ink900, 0.82f), 14));
+    }
 
     private void ShowStatus(string status)
     {
@@ -197,11 +214,10 @@ public partial class World3D : Node3D
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
 
-        var ground = new StandardMaterial3D
-        {
-            VertexColorUseAsAlbedo = true,
-            Roughness = 0.95f,
-        };
+        // Vertex colour carries the biome hue; the ground grain adds the walkable
+        // pixel texels on top, mapped in world space by TerrainMesher's UVs.
+        var ground = FlatMaterial(texture: PixelTextures.Ground());
+        ground.VertexColorUseAsAlbedo = true;
 
         var chunks = new Node3D { Name = "Chunks" };
         _worldRoot.AddChild(chunks);
@@ -214,6 +230,8 @@ public partial class World3D : Node3D
         var treeTiles = new List<(int, int)>();
         var tufts = new List<Transform3D>();
         var tuftTiles = new List<(int, int)>();
+        var berries = new List<Transform3D>();
+        var berryTiles = new List<(int, int)>();
 
         for (int cy = -Radius; cy <= Radius; cy++)
         {
@@ -223,6 +241,7 @@ public partial class World3D : Node3D
                 chunks.AddChild(TerrainMesher.Build(_terrain, coord, ground));
                 CollectTrees(coord, trunks, canopies, treeTiles);
                 CollectShrubs(coord, tufts, tuftTiles);
+                CollectBerryBushes(coord, berries, berryTiles);
             }
         }
 
@@ -232,7 +251,7 @@ public partial class World3D : Node3D
             BottomRadius = 0.34f,
             Height = 3.2f,
             RadialSegments = 6,
-        }, new Color("5a3f2b"));
+        }, new Color("5a3f2b"), PixelTextures.Bark(), new Vector3(1, 3, 1));
         _worldRoot.AddChild(trunkFoliage);
 
         var canopyFoliage = BuildFoliage(canopies, new SphereMesh
@@ -241,7 +260,7 @@ public partial class World3D : Node3D
             Height = 4.4f,
             RadialSegments = 8,
             Rings = 5,
-        }, new Color("3c7a42"));
+        }, new Color("3c7a42"), PixelTextures.Leaf(), new Vector3(2, 2, 1));
         _worldRoot.AddChild(canopyFoliage);
 
         for (int i = 0; i < treeTiles.Count; i++)
@@ -256,11 +275,23 @@ public partial class World3D : Node3D
             Height = 0.5f,
             RadialSegments = 6,
             Rings = 3,
-        }, new Color("6ea63c"));
+        }, new Color("6ea63c"), PixelTextures.Leaf());
         _worldRoot.AddChild(tuftFoliage);
 
         for (int i = 0; i < tuftTiles.Count; i++)
             RegisterFoliage(tuftTiles[i], tuftFoliage.Multimesh, i);
+
+        var berryFoliage = BuildFoliage(berries, new SphereMesh
+        {
+            Radius = 0.42f,
+            Height = 0.7f,
+            RadialSegments = 6,
+            Rings = 3,
+        }, new Color("7c3b52"), PixelTextures.Berry());
+        _worldRoot.AddChild(berryFoliage);
+
+        for (int i = 0; i < berryTiles.Count; i++)
+            RegisterFoliage(berryTiles[i], berryFoliage.Multimesh, i);
 
         _built = true;
         GD.Print($"[world3d] built {(Radius * 2 + 1) * (Radius * 2 + 1)} chunks, "
@@ -339,6 +370,45 @@ public partial class World3D : Node3D
                     float z = (float)((wy + 0.5) * metres) + offsetZ;
                     var basis = Basis.Identity.Scaled(Vector3.One * scale);
                     tufts.Add(new Transform3D(basis, new Vector3(x, y + 0.25f * scale, z)));
+                    tiles.Add((wx, wy));
+                }
+            }
+        }
+    }
+
+    /// <summary>How many berry clusters stand on one bush tile.</summary>
+    private const int ClustersPerBush = 2;
+
+    /// <summary>
+    /// A BerryBush tile is a small cluster of rounded, berry-dark forms, foraged
+    /// for food. Jittered from the tile hash like shrubs so a patch never looks
+    /// stamped; a distinct salt keeps its layout independent of the shrub tufts.
+    /// </summary>
+    private void CollectBerryBushes(ChunkCoord coord, List<Transform3D> clusters, List<(int, int)> tiles)
+    {
+        int size = TerrainGenerator.ChunkSize;
+        double metres = TerrainGenerator.TileMetres;
+
+        for (int ly = 0; ly < size; ly++)
+        {
+            for (int lx = 0; lx < size; lx++)
+            {
+                int wx = coord.X * size + lx, wy = coord.Y * size + ly;
+                if (_terrain.TileAt(wx, wy) != TileType.BerryBush) continue;
+
+                float y = (float)_terrain.HeightAt(wx + 0.5, wy + 0.5);
+
+                for (int c = 0; c < ClustersPerBush; c++)
+                {
+                    uint hash = SimCore.Noise.Hash(wx, wy, Seed ^ (0xB3EEu + (uint)c * 0x9E37u));
+                    float scale = 0.8f + (hash & 0xFF) / 255f * 0.5f;
+                    float offsetX = ((hash >> 8 & 0xFF) / 255f - 0.5f) * (float)metres * 0.5f;
+                    float offsetZ = ((hash >> 16 & 0xFF) / 255f - 0.5f) * (float)metres * 0.5f;
+
+                    float x = (float)((wx + 0.5) * metres) + offsetX;
+                    float z = (float)((wy + 0.5) * metres) + offsetZ;
+                    var basis = Basis.Identity.Scaled(Vector3.One * scale);
+                    clusters.Add(new Transform3D(basis, new Vector3(x, y + 0.32f * scale, z)));
                     tiles.Add((wx, wy));
                 }
             }
@@ -563,7 +633,7 @@ public partial class World3D : Node3D
     {
         Mesh = new BoxMesh { Size = new Vector3((float)TerrainGenerator.TileMetres, 2.4f, 0.4f) },
         Position = Vector3.Up * 1.2f,
-        MaterialOverride = new StandardMaterial3D { AlbedoColor = WallColour, Roughness = 0.9f },
+        MaterialOverride = FlatMaterial(WallColour),
     };
 
     private static Node3D BuildCampfire()
@@ -579,7 +649,9 @@ public partial class World3D : Node3D
                 EmissionEnabled = true,
                 Emission = new Color("ff7a1a"),
                 EmissionEnergyMultiplier = 2.0f,
-                Roughness = 0.8f,
+                Roughness = 1.0f,
+                SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
+                TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest,
             },
         });
         root.AddChild(new OmniLight3D
@@ -593,10 +665,33 @@ public partial class World3D : Node3D
     }
 
     /// <summary>
+    /// A flat, banded material: toon-stepped diffuse with no specular gives the
+    /// medium pixel-art read the design calls for, and nearest filtering keeps
+    /// every texel crisp. Combined with the fullscreen pixelation pass, the
+    /// world looks hand-placed rather than smoothly lit.
+    /// </summary>
+    private static StandardMaterial3D FlatMaterial(
+        Color? albedo = null, Texture2D? texture = null, Vector3? uvScale = null)
+    {
+        var material = new StandardMaterial3D
+        {
+            AlbedoColor = albedo ?? Colors.White,
+            Roughness = 1.0f,
+            DiffuseMode = BaseMaterial3D.DiffuseModeEnum.Toon,
+            SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
+            TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest,
+        };
+        if (texture is not null) material.AlbedoTexture = texture;
+        if (uvScale is { } scale) material.Uv1Scale = scale;
+        return material;
+    }
+
+    /// <summary>
     /// One MultiMesh per part keeps thousands of trees to two draw calls,
     /// which is what makes this viable on a phone.
     /// </summary>
-    private MultiMeshInstance3D BuildFoliage(List<Transform3D> instances, Mesh mesh, Color colour)
+    private MultiMeshInstance3D BuildFoliage(
+        List<Transform3D> instances, Mesh mesh, Color colour, Texture2D? texture = null, Vector3? uvScale = null)
     {
         var multi = new MultiMesh
         {
@@ -610,7 +705,7 @@ public partial class World3D : Node3D
         return new MultiMeshInstance3D
         {
             Multimesh = multi,
-            MaterialOverride = new StandardMaterial3D { AlbedoColor = colour, Roughness = 0.9f },
+            MaterialOverride = FlatMaterial(colour, texture, uvScale),
         };
     }
 }

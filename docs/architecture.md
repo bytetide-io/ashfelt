@@ -27,6 +27,48 @@ drives both the surface classification and the mesh, so the two can never
 disagree. It is in `sim-core` precisely because the server will need identical
 heights for collision.
 
+### Presentation: the Ashfall design system
+
+**Decided.** All client visual style flows from one place, `scripts/ui/DesignSystem.cs`
+— the Ink/Ember palette, the Silkscreen (display) + Pixelify Sans (body) fonts,
+and the chunky pixel controls (flat fills, a hard 2px outline, a solid offset
+"shadow" for depth). HUD and menus build from these tokens; nothing re-declares
+a shade or a button box. Item/resource **icons are data, not files**: the pixel
+grids from the design system's `PixelIcon` component are baked to nearest-filtered
+textures at runtime by `scripts/ui/PixelIcons.cs`, keeping the mobile binary
+free of per-icon PNGs and honouring the "use the design's assets, don't hand-roll
+SVG" rule.
+
+The "medium pixel-art, still 3D" look is done as a **low-resolution render**, not
+a post-process — the distinction matters. The world renders into a `SubViewport`
+sized down by `stretch_shrink` (with MSAA/AA off) and is nearest-upscaled by its
+`SubViewportContainer`. Because geometry is rasterised natively at that low
+resolution, the pixels are real and grid-aligned (authentic pixel art), and the
+GPU shades roughly `shrink²` fewer fragments — so the effect *improves* mobile
+framerate instead of costing it. A fullscreen shader that downsamples an already
+full-res image was tried and rejected: it looks like low resolution rather than
+pixel art, and it adds cost on top of full-res shading.
+
+The pixels themselves live **on the surfaces**, not on the screen. Terrain and
+foliage carry procedural, nearest-filtered pixel textures generated from
+`Noise.Hash` (`World3D/PixelTextures.cs`) — ground grain, bark, leaf and berry
+dapple — multiplied over each surface's colour. The terrain mesh bakes
+**world-space UVs** (`TerrainMesher.Uv`) so the grain tiles seamlessly across
+chunks and stays welded to the ground as the camera pans; that world-anchored
+texel motion is what stops the look reading as a screen-space filter. A
+fullscreen shader that downsamples an already full-res image was tried and
+rejected for exactly that reason: with untextured surfaces it only blocks up
+smooth shapes, which looks like low resolution rather than pixel art — and it
+adds cost on top of full-res shading.
+
+Flat toon-banded, specular-disabled materials (`World3D.FlatMaterial`) complete
+the banded look. The HUD lives on a `CanvasLayer` *outside* the SubViewport so it
+composites at full resolution and stays crisp; `World3D` reaches the HUD and its
+status label by exported `NodePath` across the SubViewport boundary. Input is
+routed and coordinate-remapped into the SubViewport by the container, so the
+existing tap-to-harvest raycast (`GetViewport().GetCamera3D()`) needs no change —
+it already resolves against the SubViewport's camera and physics world.
+
 ### Movement authority: the client simulates, the server validates
 
 **Decided.** The client runs physics and reports where it ended up. The server
@@ -81,6 +123,12 @@ compatibility contract — changing generation changes every existing world.
   This alters `TerrainGenerator.TileAt` output, so worlds generated before it
   differ — acceptable because no world has shipped. The determinism tests still
   pass: they assert consistency and biome variety, not fixed tile values.
+- **BerryBush tile (pre-alpha).** A walkable `BerryBush` tile was scattered into
+  the open-grass band (rarer than shrubs, placed on grass the shrub pass left)
+  so forageable food exists and the survival loop is winnable — you can eat.
+  Same rationale and same test guarantees as the shrub change: it alters
+  `TileAt` output but no world has shipped, and the determinism tests assert
+  consistency and variety, not fixed values.
 
 ## Target frameworks
 

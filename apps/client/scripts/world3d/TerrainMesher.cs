@@ -12,7 +12,7 @@ namespace Ashfall.Client;
 /// </summary>
 public static class TerrainMesher
 {
-    private static readonly Color DeepWaterColour = new("1b3a5c");
+    private static readonly Color DeepWaterColour = new("183457");
     private static readonly Color WaterColour = new("2f6690");
     private static readonly Color SandColour = new("d6c180");
     private static readonly Color GrassColour = new("4a7c40");
@@ -58,8 +58,15 @@ public static class TerrainMesher
                 var c = Corner(terrain, wx + 1, wy + 1, ox, oy);
                 var d = Corner(terrain, wx, wy + 1, ox, oy);
 
-                AddTriangle(surface, colour, a, b, c);
-                AddTriangle(surface, colour, a, c, d);
+                // UVs are world-space so the pixel grain tiles seamlessly across
+                // chunks and stays welded to the ground as the camera moves.
+                var ua = Uv(wx, wy);
+                var ub = Uv(wx + 1, wy);
+                var uc = Uv(wx + 1, wy + 1);
+                var ud = Uv(wx, wy + 1);
+
+                AddTriangle(surface, colour, (a, ua), (b, ub), (c, uc));
+                AddTriangle(surface, colour, (a, ua), (c, uc), (d, ud));
             }
         }
 
@@ -91,18 +98,29 @@ public static class TerrainMesher
             (float)((wy - oy) * metres));
     }
 
-    private static void AddTriangle(SurfaceTool surface, Color colour, Vector3 a, Vector3 b, Vector3 c)
+    /// <summary>Tiles the pixel grain every <see cref="RepeatTiles"/> world tiles.</summary>
+    private const float RepeatTiles = 2f;
+
+    private static Vector2 Uv(int wx, int wy) => new(wx / RepeatTiles, wy / RepeatTiles);
+
+    private static void AddTriangle(
+        SurfaceTool surface, Color colour,
+        (Vector3 Pos, Vector2 Uv) a, (Vector3 Pos, Vector2 Uv) b, (Vector3 Pos, Vector2 Uv) c)
     {
         // Vertex colours are consumed as linear, but the palette is authored in
         // sRGB like every other colour in the project. Without this conversion
         // everything renders pale and washed out.
         colour = colour.SrgbToLinear();
 
+        AddVertex(surface, colour, a);
+        AddVertex(surface, colour, b);
+        AddVertex(surface, colour, c);
+    }
+
+    private static void AddVertex(SurfaceTool surface, Color colour, (Vector3 Pos, Vector2 Uv) vertex)
+    {
         surface.SetColor(colour);
-        surface.AddVertex(a);
-        surface.SetColor(colour);
-        surface.AddVertex(b);
-        surface.SetColor(colour);
-        surface.AddVertex(c);
+        surface.SetUV(vertex.Uv);
+        surface.AddVertex(vertex.Pos);
     }
 }

@@ -21,9 +21,11 @@ public partial class VirtualJoystick : Control
     /// <summary>Movement direction, each axis -1..1 with y pointing up (forward).</summary>
     public Vector2 Output { get; private set; } = Vector2.Zero;
 
-    private static readonly Color BaseColour = new(1, 1, 1, 0.12f);
-    private static readonly Color RingColour = new(1, 1, 1, 0.35f);
-    private static readonly Color KnobColour = new(1, 1, 1, 0.55f);
+    // Tinted to the Ashfall design system: an ink well, a parchment ring, an
+    // ember knob so the steering thumb reads against any terrain.
+    private static readonly Color BaseColour = new(0.06f, 0.05f, 0.03f, 0.55f);
+    private static readonly Color RingColour = new(0.925f, 0.89f, 0.824f, 0.5f);
+    private static readonly Color KnobColour = new(0.878f, 0.518f, 0.18f, 0.9f);
 
     private const float KnobRadius = 42f;
 
