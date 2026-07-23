@@ -1,0 +1,55 @@
+name: Feature request / idea
+description: Suggest new gameplay, content, or an improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ashfall has a deliberate shape — **survival-first, mobile-only,
+        server-authoritative, bounded worlds.** The best proposals show how they
+        make *surviving more interesting* within that shape. It's much nicer to
+        reshape an idea in an issue than to have a finished PR sent back, so
+        pitch it here first.
+
+        Worth skimming before you write: the
+        [vision](../blob/main/CONTRIBUTING.md#the-vision-read-this-before-you-write-code)
+        and the [gameplay roadmap](../blob/main/docs/gameplay-roadmap.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem or opportunity
+      description: What's missing, frustrating, or possible? What player experience are you aiming at?
+      placeholder: There's no reason to explore beyond the starting area once you've found trees and rock…
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Your proposal
+      description: What would you add or change? Sketch it as concretely as you can.
+    validations:
+      required: true
+  - type: dropdown
+    id: fit
+    attributes:
+      label: How does it fit the survival-first vision?
+      description: Every feature should make surviving more interesting.
+      options:
+        - Adds a new survival threat or pressure
+        - Gives the player a new way to act against a threat
+        - Deepens gathering / crafting / building
+        - Improves progression or reasons to return
+        - Polish / UX / onboarding
+        - Other (explain below)
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Any impact on the invariants?
+      description: >
+        Does this touch server authority, seed+diffs storage, gateway-owned
+        characters, the shared sim library, determinism, or interest management?
+        If you're not sure, say so — that's fine.
+    validations:
+      required: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Read the contributing guide first
+    url: https://github.com/bytetide-io/ashfelt/blob/main/CONTRIBUTING.md
+    about: Setup, workflow, coding standards, and where to find work to pick up.
+  - name: Security / cheat-the-server report (private)
+    url: https://github.com/bytetide-io/ashfelt/blob/main/SECURITY.md
+    about: Don't file exploits publicly — report them privately per our security policy.

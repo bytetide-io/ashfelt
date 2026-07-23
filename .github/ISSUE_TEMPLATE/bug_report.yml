@@ -1,0 +1,67 @@
+name: Bug report
+description: Something isn't working the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! The more precisely you can
+        describe it, the faster it gets fixed.
+
+        **Found a security issue or a way to cheat the authoritative server?**
+        Don't file it here — follow [SECURITY.md](../blob/main/SECURITY.md) and
+        report it privately.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Ashfall is affected?
+      options:
+        - client (Godot)
+        - world-server
+        - gateway
+        - sim-core (shared simulation)
+        - build / tooling / CI
+        - not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug, and what you expected instead.
+      placeholder: I tapped a tree within reach, but no wood was added and the node didn't wear down…
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: How can we make it happen?
+      placeholder: |
+        1. Start a world-server (seed 1337)
+        2. Connect the client
+        3. Walk up to a tree and tap it
+        4. …
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, .NET SDK version (`dotnet --version`), Godot version, and how you ran it (editor / device / Docker).
+      placeholder: |
+        - OS: macOS 14.5
+        - .NET SDK: 10.0.100
+        - Godot: 4.3 mono
+        - Ran the client in the editor against a local world-server
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Paste any relevant server output, Godot console errors, or screenshots. Code blocks are rendered automatically.
+      render: shell
+    validations:
+      required: false
