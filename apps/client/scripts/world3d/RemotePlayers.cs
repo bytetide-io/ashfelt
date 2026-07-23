@@ -7,10 +7,16 @@ namespace Ashfall.Client;
 /// Other players, drawn from the server's authoritative snapshots. Positions
 /// are eased rather than snapped, because snapshots arrive at 15 Hz while the
 /// game renders far faster.
+///
+/// Each puppet is a <see cref="CharacterRig"/> — the same body the local player
+/// wears — so a remote player visibly walks and runs. Its gait is inferred from
+/// how fast the eased position is actually moving; the snapshot carries no
+/// velocity, and none is needed. Harvest swings are local-only until the
+/// protocol carries a per-player action, so remote bodies don't yet chop.
 /// </summary>
 public partial class RemotePlayers : Node3D
 {
-    private readonly Dictionary<int, Node3D> _bodies = new();
+    private readonly Dictionary<int, CharacterRig> _bodies = new();
     private readonly Dictionary<int, Vector3> _targets = new();
     private readonly Dictionary<int, float> _yaws = new();
 
@@ -29,12 +35,7 @@ public partial class RemotePlayers : Node3D
     {
         if (_bodies.ContainsKey(id)) return;
 
-        var body = new MeshInstance3D
-        {
-            Mesh = new CapsuleMesh { Radius = 0.4f, Height = 1.8f },
-            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color("c96f4a") },
-            Position = at,
-        };
+        var body = new CharacterRig { Position = at };
         AddChild(body);
         _bodies[id] = body;
     }
@@ -58,12 +59,18 @@ public partial class RemotePlayers : Node3D
     public override void _Process(double delta)
     {
         float weight = Mathf.Min(1f, (float)delta * 12f);
+        float dt = Mathf.Max((float)delta, 0.0001f);
         foreach (var (id, body) in _bodies)
         {
+            var before = body.Position;
             if (_targets.TryGetValue(id, out var target))
                 body.Position = body.Position.Lerp(target, weight);
             if (_yaws.TryGetValue(id, out var yaw))
                 body.Rotation = body.Rotation with { Y = yaw };
+
+            var step = body.Position - before;
+            float planarSpeed = new Vector2(step.X, step.Z).Length() / dt;
+            body.SetLocomotion(planarSpeed, grounded: true);
         }
     }
 }
