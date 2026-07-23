@@ -198,7 +198,11 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                 break;
             }
 
-            var harvest = world.TryHarvest(tx, ty);
+            // A tool matching the node speeds the gather: resolve the node's
+            // preferred class, then how good a tool of that class the player holds.
+            var preferredTool = HarvestRules.PreferredTool(world.TileAt(tx, ty));
+            int toolTier = player.ToolTierFor(preferredTool);
+            var harvest = world.TryHarvest(tx, ty, preferredTool, toolTier);
             if (!harvest.Allowed) break;
 
             player.Give(harvest.Item, harvest.Amount);
@@ -226,6 +230,19 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
             player.ApplyCraft(craft.Deltas);
             Console.WriteLine($"[world] player {player.Id} crafted {output}");
+            break;
+        }
+
+        case MessageId.EatRequest:
+        {
+            var food = (ItemId)reader.GetByte();
+            if (!player.Eat(food)) break;
+
+            // Echo the restored meters at once so hunger jumps on the bite rather
+            // than waiting for the next heartbeat; the heartbeat still self-heals a
+            // dropped echo.
+            SendStats(player, tick);
+            Console.WriteLine($"[world] player {player.Id} ate {food}");
             break;
         }
 
@@ -343,7 +360,15 @@ while (!shutdown.IsSet)
     server.PollEvents();
 
     tick++;
-    foreach (var player in players.Values) player.AdvanceSurvival(1);
+    // A player is warm in daylight, or at night while sheltering within a
+    // campfire's warmth radius. Exposed at night, warmth drains and — once
+    // empty — health, so night is a real threat and the fire earns its keep.
+    bool daytime = WorldClock.IsDaytime(WorldClock.TimeOfDay(tick));
+    foreach (var player in players.Values)
+    {
+        bool warm = daytime || world.HasWarmthNear(player.Position);
+        player.AdvanceSurvival(1, warm);
+    }
 
     if (players.Count > 0)
     {
@@ -378,22 +403,7 @@ while (!shutdown.IsSet)
         }
 
         if (tick % Tuning.StatsHeartbeatTicks == 0)
-        {
-            float timeOfDay = (float)WorldClock.TimeOfDay(tick);
-            foreach (var player in players.Values)
-            {
-                var survival = player.Survival;
-                writer.Reset();
-                writer.Put((byte)MessageId.StatsUpdate);
-                writer.Put(survival.HungerPoints);
-                writer.Put(survival.StaminaPoints);
-                writer.Put(survival.HealthPoints);
-                writer.Put(timeOfDay);
-                // Unreliable: the next heartbeat replaces a dropped one, and the
-                // client interpolates time-of-day locally between beats.
-                player.Peer.Send(writer, DeliveryMethod.Unreliable);
-            }
-        }
+            foreach (var player in players.Values) SendStats(player, tick);
     }
 
     Thread.Sleep(tickMs);
@@ -409,6 +419,24 @@ void Broadcast(NetDataWriter data, NetPeer? exclude = null,
     foreach (var peer in players.Keys)
         if (peer != exclude)
             peer.Send(data, method);
+}
+
+// The survival meters plus time-of-day for one player. Sent both on the slow
+// heartbeat and immediately after an action that changes the meters (eating),
+// so the client never waits a full beat to see the effect of what it just did.
+void SendStats(Player player, long atTick)
+{
+    var survival = player.Survival;
+    writer.Reset();
+    writer.Put((byte)MessageId.StatsUpdate);
+    writer.Put(survival.HungerPoints);
+    writer.Put(survival.StaminaPoints);
+    writer.Put(survival.HealthPoints);
+    writer.Put(survival.WarmthPoints);
+    writer.Put((float)WorldClock.TimeOfDay(atTick));
+    // Unreliable: a dropped stats packet is replaced by the next heartbeat, and
+    // the client interpolates time-of-day locally between beats.
+    player.Peer.Send(writer, DeliveryMethod.Unreliable);
 }
 
 static void WriteStructurePlaced(NetDataWriter data, Structure structure)

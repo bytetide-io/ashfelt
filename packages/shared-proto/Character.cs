@@ -15,4 +15,5 @@ public sealed record CharacterState
     public int Hunger { get; init; } = 100;
     public int Stamina { get; init; } = 100;
     public int Health { get; init; } = 100;
+    public int Warmth { get; init; } = 100;
 }

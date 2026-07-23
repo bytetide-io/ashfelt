@@ -37,8 +37,8 @@ public partial class WorldConnection : Node
     /// <summary>(structure id, kind, tileX, tileY) — a structure to render.</summary>
     public event Action<long, ItemId, int, int>? StructurePlaced;
 
-    /// <summary>(hunger, stamina, health) in display points, plus time-of-day in [0,1).</summary>
-    public event Action<int, int, int, float>? StatsUpdated;
+    /// <summary>(hunger, stamina, health, warmth) in display points, plus time-of-day in [0,1).</summary>
+    public event Action<int, int, int, int, float>? StatsUpdated;
 
     /// <summary>The current world refused a voyage; the reason, for the player.</summary>
     public event Action<string>? VoyageDenied;
@@ -159,6 +159,20 @@ public partial class WorldConnection : Node
         _writer.Reset();
         _writer.Put((byte)MessageId.CraftRequest);
         _writer.Put((byte)output);
+        _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
+    }
+
+    /// <summary>
+    /// Ask to eat one edible item. The server authorises it against the item's
+    /// food value and consumes one from inventory; the restored meters and
+    /// reduced stack come back as the usual stats and inventory updates.
+    /// </summary>
+    public void SendEat(ItemId food)
+    {
+        if (!IsLinked) return;
+        _writer.Reset();
+        _writer.Put((byte)MessageId.EatRequest);
+        _writer.Put((byte)food);
         _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
     }
 
@@ -350,8 +364,9 @@ public partial class WorldConnection : Node
                 int hunger = reader.GetInt();
                 int stamina = reader.GetInt();
                 int health = reader.GetInt();
+                int warmth = reader.GetInt();
                 float timeOfDay = reader.GetFloat();
-                StatsUpdated?.Invoke(hunger, stamina, health, timeOfDay);
+                StatsUpdated?.Invoke(hunger, stamina, health, warmth, timeOfDay);
                 break;
             }
 

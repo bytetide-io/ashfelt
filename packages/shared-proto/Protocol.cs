@@ -52,6 +52,14 @@ public enum MessageId : byte
     /// </summary>
     RequestRelease = 7,
 
+    /// <summary>
+    /// Ask to eat one edible <see cref="ItemId"/> from inventory. Layout: byte
+    /// item id. The server authorises it against the item's food value in the
+    /// shared <c>ItemCatalog</c>, consumes one, and restores hunger via
+    /// <c>SurvivalRules.Eat</c>. A non-food or absent item is ignored.
+    /// </summary>
+    EatRequest = 8,
+
     // server -> client
     Welcome = 100,
     ChunkData = 101,
@@ -68,8 +76,9 @@ public enum MessageId : byte
 
     /// <summary>
     /// The receiving player's authoritative survival meters (hunger, stamina,
-    /// health) in display points, plus the world time-of-day. Sent on change and
-    /// on a slow heartbeat so a dropped packet self-heals.
+    /// health, warmth) in display points, plus the world time-of-day. Layout:
+    /// four ints then a float. Sent on change and on a slow heartbeat so a dropped
+    /// packet self-heals.
     /// </summary>
     StatsUpdate = 107,
 
@@ -101,7 +110,7 @@ public enum MessageId : byte
 public static class ProtocolVersion
 {
     /// <summary>Bumped whenever message layout changes. Mismatched peers are rejected.</summary>
-    public const int Current = 7;
+    public const int Current = 9;
 }
 
 /// <summary>Item kinds. Values are wire-stable — append only, never renumber.</summary>
@@ -117,6 +126,8 @@ public enum ItemId : byte
     Pickaxe = 7,
     Wall = 8,
     Campfire = 9,
+    /// <summary>Edible forage from a berry bush; restores hunger when eaten.</summary>
+    Berry = 10,
 }
 
 public static class Tuning

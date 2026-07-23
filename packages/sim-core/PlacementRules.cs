@@ -10,25 +10,18 @@ namespace Ashfall.SimCore;
 public static class PlacementRules
 {
     /// <summary>
-    /// The placeable items, in stable declaration order. Iterate this for a
-    /// deterministic placement menu instead of hand-listing the ids.
+    /// The placeable items, in stable declaration order, derived from the item
+    /// catalog so the two never drift. Iterate this for a deterministic
+    /// placement menu instead of hand-listing the ids.
     /// </summary>
-    public static readonly IReadOnlyList<ItemId> Placeables = new[]
-    {
-        ItemId.Wall,
-        ItemId.Campfire,
-    };
+    public static readonly IReadOnlyList<ItemId> Placeables =
+        ItemCatalog.All.Where(def => def.Placeable).Select(def => def.Id).ToArray();
 
     /// <summary>
     /// True when spending one <paramref name="item"/> places a structure on the
-    /// world. Only a small, wire-stable set is placeable.
+    /// world — the single source of truth is <see cref="ItemDef.Placeable"/>.
     /// </summary>
-    public static bool IsPlaceable(ItemId item) => item switch
-    {
-        ItemId.Wall => true,
-        ItemId.Campfire => true,
-        _ => false,
-    };
+    public static bool IsPlaceable(ItemId item) => ItemCatalog.TryGet(item, out var def) && def.Placeable;
 
     /// <summary>
     /// True when the placed structure blocks movement. A Wall is solid; a

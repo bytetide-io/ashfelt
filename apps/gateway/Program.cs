@@ -52,7 +52,7 @@ app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
     await ReclaimExpiredTicketAsync(db, id);
 
     await using var cmd = db.CreateCommand(
-        "SELECT inventory, hunger, stamina, health FROM character WHERE id = $1");
+        "SELECT inventory, hunger, stamina, health, warmth FROM character WHERE id = $1");
     cmd.Parameters.AddWithValue(id);
 
     await using var reader = await cmd.ExecuteReaderAsync();
@@ -64,6 +64,7 @@ app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
         Hunger = reader.GetInt32(1),
         Stamina = reader.GetInt32(2),
         Health = reader.GetInt32(3),
+        Warmth = reader.GetInt32(4),
     };
     return Results.Ok(character);
 });
@@ -72,13 +73,14 @@ app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
 app.MapPut("/characters/{id:guid}", async (Guid id, CharacterState character, NpgsqlDataSource db) =>
 {
     await using var cmd = db.CreateCommand("""
-        INSERT INTO character (id, inventory, hunger, stamina, health, updated_at)
-        VALUES ($1, $2, $3, $4, $5, now())
+        INSERT INTO character (id, inventory, hunger, stamina, health, warmth, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, now())
         ON CONFLICT (id) DO UPDATE SET
             inventory = EXCLUDED.inventory,
             hunger = EXCLUDED.hunger,
             stamina = EXCLUDED.stamina,
             health = EXCLUDED.health,
+            warmth = EXCLUDED.warmth,
             updated_at = now()
         """);
     cmd.Parameters.AddWithValue(id);
@@ -90,6 +92,7 @@ app.MapPut("/characters/{id:guid}", async (Guid id, CharacterState character, Np
     cmd.Parameters.AddWithValue(character.Hunger);
     cmd.Parameters.AddWithValue(character.Stamina);
     cmd.Parameters.AddWithValue(character.Health);
+    cmd.Parameters.AddWithValue(character.Warmth);
     await cmd.ExecuteNonQueryAsync();
 
     return Results.Ok();

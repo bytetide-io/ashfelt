@@ -112,4 +112,45 @@ public class SurvivalRulesTests
         Assert.False(TrySpendStamina(rested, 30, out var after));
         Assert.Equal(rested, after);
     }
+
+    [Fact]
+    public void Warmth_DrainsWhenColdAndRecoversWhenWarm()
+    {
+        var start = FromPoints(hunger: MaxPoints, stamina: MaxPoints, health: MaxPoints, warmth: 50);
+
+        var cold = Advance(start, TicksPerMinute, warm: false);
+        Assert.Equal(50 - WarmthLossPerMinute, cold.WarmthPoints);
+
+        var warmedBack = Advance(cold, TicksPerMinute, warm: true);
+        Assert.Equal(cold.WarmthPoints + WarmthRegenPerMinute, warmedBack.WarmthPoints);
+    }
+
+    [Fact]
+    public void Freezing_BleedsHealth_AndStacksWithStarvation()
+    {
+        // Empty warmth and full hunger: health falls at the freezing rate alone.
+        var frozen = FromPoints(hunger: MaxPoints, stamina: 0, health: MaxPoints, warmth: 0);
+        var afterFreeze = Advance(frozen, TicksPerMinute, warm: false);
+        Assert.Equal(MaxPoints - FreezingHealthLossPerMinute, afterFreeze.HealthPoints);
+
+        // Empty warmth and empty hunger: both losses apply in the same minute.
+        var frozenAndStarving = FromPoints(hunger: 0, stamina: 0, health: MaxPoints, warmth: 0);
+        var afterBoth = Advance(frozenAndStarving, TicksPerMinute, warm: false);
+        Assert.Equal(
+            MaxPoints - FreezingHealthLossPerMinute - StarvationHealthLossPerMinute,
+            afterBoth.HealthPoints);
+    }
+
+    [Fact]
+    public void Warmth_ComposesOverTicks_LikeTheOtherMeters()
+    {
+        var start = FromPoints(hunger: MaxPoints, stamina: MaxPoints, health: MaxPoints, warmth: MaxPoints);
+
+        var oneCall = Advance(start, TicksPerMinute * 3, warm: false);
+
+        var stepped = start;
+        for (int i = 0; i < 3; i++) stepped = Advance(stepped, TicksPerMinute, warm: false);
+
+        Assert.Equal(stepped, oneCall);
+    }
 }

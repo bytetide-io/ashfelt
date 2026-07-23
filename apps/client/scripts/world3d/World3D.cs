@@ -50,6 +50,7 @@ public partial class World3D : Node3D
     private SurvivalHud _hud = null!;
     private DirectionalLight3D _sun = null!;
     private WorldEnvironment _environment = null!;
+    private CrtOverlay _crt = null!;
     private double _reportTimer;
     private bool _built;
 
@@ -70,6 +71,10 @@ public partial class World3D : Node3D
         _hud = GetNode<SurvivalHud>(HudPath);
         _sun = GetNode<DirectionalLight3D>("Sun");
         _environment = GetNode<WorldEnvironment>("WorldEnvironment");
+        // The CRT grade sits over the world but under the HUD's own CanvasLayer,
+        // so scanlines never dim the interface.
+        _crt = new CrtOverlay();
+        AddChild(_crt);
         _hud.Bind(_connection);
         _hud.PlaceRequested += OnPlaceRequested;
         _player.MoveStick = _hud.MoveStick;
@@ -198,6 +203,7 @@ public partial class World3D : Node3D
         _sun.LightColor = NightLightColour.Lerp(DayLightColour, daylight);
         _environment.Environment.AmbientLightEnergy =
             Mathf.Lerp(NightAmbientEnergy, DayAmbientEnergy, daylight);
+        _crt.SetTimeOfDay((float)timeOfDay);
     }
 
     /// <summary>
@@ -466,9 +472,67 @@ public partial class World3D : Node3D
 
     public override void _PhysicsProcess(double delta)
     {
+        UpdateGatherPrompt();
+
         if (_pendingTap is not { } tap) return;
         _pendingTap = null;
         TryHarvestAt(tap);
+    }
+
+    /// <summary>
+    /// Surfaces the design's "tap to gather" reticle over the nearest harvestable
+    /// tile in reach, so the one-thumb player always knows what a tap will pick.
+    /// This is presentation only — it reads the shared harvest rules the server
+    /// also enforces, and hides when nothing is close enough to chop.
+    /// </summary>
+    private void UpdateGatherPrompt()
+    {
+        if (!_built) { _hud.HideGatherPrompt(); return; }
+        var camera = GetViewport().GetCamera3D();
+        if (camera is null) { _hud.HideGatherPrompt(); return; }
+
+        float metres = (float)TerrainGenerator.TileMetres;
+        float range = (float)Proto.Tuning.ChopRangeMetres;
+        Vector3 player = _player.GlobalPosition;
+        int radius = Mathf.CeilToInt(range / metres);
+        int playerTileX = Mathf.FloorToInt(player.X / metres);
+        int playerTileY = Mathf.FloorToInt(player.Z / metres);
+
+        float bestSq = range * range;
+        bool found = false;
+        int bestX = 0, bestY = 0;
+        for (int dy = -radius; dy <= radius; dy++)
+        for (int dx = -radius; dx <= radius; dx++)
+        {
+            int tileX = playerTileX + dx, tileY = playerTileY + dy;
+            if (!HarvestRules.IsHarvestable(_terrain.TileAt(tileX, tileY))) continue;
+
+            float centreX = (float)((tileX + 0.5) * metres);
+            float centreZ = (float)((tileY + 0.5) * metres);
+            float distSq = (player.X - centreX) * (player.X - centreX)
+                         + (player.Z - centreZ) * (player.Z - centreZ);
+            if (distSq >= bestSq) continue;
+            bestSq = distSq;
+            bestX = tileX;
+            bestY = tileY;
+            found = true;
+        }
+
+        if (!found) { _hud.HideGatherPrompt(); return; }
+
+        float worldX = (float)((bestX + 0.5) * metres);
+        float worldZ = (float)((bestY + 0.5) * metres);
+        float worldY = (float)_terrain.HeightAt(bestX + 0.5, bestY + 0.5);
+        Vector2 viewportPoint = camera.UnprojectPosition(new Vector3(worldX, worldY, worldZ));
+
+        // The world renders in a half-resolution SubViewport; scale its point up
+        // into the full-window space the HUD lives in.
+        Vector2 subSize = GetViewport().GetVisibleRect().Size;
+        Vector2 hudSize = _hud.Size;
+        Vector2 scale = subSize == Vector2.Zero ? Vector2.One : hudSize / subSize;
+
+        var tile = _terrain.TileAt(bestX, bestY);
+        _hud.ShowGatherPrompt(viewportPoint * scale, HarvestRules.Evaluate(tile).Item);
     }
 
     /// <summary>How far a harvest ray is allowed to travel before giving up.</summary>

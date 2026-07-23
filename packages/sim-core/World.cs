@@ -51,9 +51,9 @@ public sealed class World
     /// <c>Allowed</c> is true the diff has been applied in memory and the
     /// caller is responsible for persisting it.
     /// </summary>
-    public HarvestRules.Harvest TryHarvest(int wx, int wy)
+    public HarvestRules.Harvest TryHarvest(int wx, int wy, ToolClass heldTool = ToolClass.None, int heldTier = 0)
     {
-        var result = HarvestRules.Evaluate(TileAt(wx, wy));
+        var result = HarvestRules.Evaluate(TileAt(wx, wy), heldTool, heldTier);
         if (result.Allowed) _diffs[(wx, wy)] = result.Becomes;
         return result;
     }
@@ -90,6 +90,25 @@ public sealed class World
 
     /// <summary>Removes the structure at a tile, if any. Returns whether one was there.</summary>
     public bool RemoveStructure(int tileX, int tileY) => _structures.TryRemove((tileX, tileY), out _);
+
+    /// <summary>
+    /// True when <paramref name="position"/> lies within the warmth radius of any
+    /// heat-providing structure (a lit campfire). Horizontal distance only, so a
+    /// ledge above the fire still counts — mirrors how harvest reach is measured.
+    /// This is what lets a player survive the night by sheltering near a fire.
+    /// </summary>
+    public bool HasWarmthNear(Vec3 position)
+    {
+        double metres = TerrainGenerator.TileMetres;
+        foreach (var structure in _structures.Values)
+        {
+            if (!ItemCatalog.TryGet(structure.Kind, out var def) || def.WarmthRadiusMetres <= 0) continue;
+
+            var centre = new Vec3((structure.TileX + 0.5) * metres, position.Y, (structure.TileY + 0.5) * metres);
+            if (position.HorizontalDistanceTo(centre) <= def.WarmthRadiusMetres) return true;
+        }
+        return false;
+    }
 
     public int StructureCount => _structures.Count;
 

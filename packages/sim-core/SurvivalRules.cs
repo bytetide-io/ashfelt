@@ -39,33 +39,49 @@ public static class SurvivalRules
     /// <summary>Stamina recovers this many points per minute while not exerting.</summary>
     public const int StaminaRegenPerMinute = 60;
 
+    /// <summary>Warmth falls this many points per minute while cold (exposed at night).</summary>
+    public const int WarmthLossPerMinute = 10;
+
+    /// <summary>Warmth recovers this many points per minute while warm (day, or near a fire).</summary>
+    public const int WarmthRegenPerMinute = 20;
+
+    /// <summary>Once warmth is empty, health bleeds this many points per minute — on
+    /// top of any starvation loss, so freezing and starving together kill faster.</summary>
+    public const int FreezingHealthLossPerMinute = 10;
+
     // Per-tick deltas equal the per-minute rates because FixedPerPoint is one
     // minute of ticks (see the type remarks).
     private const int HungerLossPerTick = HungerLossPerMinute;
     private const int StarvationHealthLossPerTick = StarvationHealthLossPerMinute;
     private const int StaminaRegenPerTick = StaminaRegenPerMinute;
+    private const int WarmthLossPerTick = WarmthLossPerMinute;
+    private const int WarmthRegenPerTick = WarmthRegenPerMinute;
+    private const int FreezingHealthLossPerTick = FreezingHealthLossPerMinute;
 
     /// <summary>
     /// A player's survival meters, in fixed-point units (0..<see cref="MaxFixed"/>).
     /// Immutable: every rule returns a fresh state rather than mutating in place.
     /// </summary>
-    public readonly record struct SurvivalState(int Hunger, int Stamina, int Health)
+    public readonly record struct SurvivalState(int Hunger, int Stamina, int Health, int Warmth)
     {
-        /// <summary>A well-fed, rested, healthy player — the spawn state.</summary>
-        public static SurvivalState Full => FromPoints(MaxPoints, MaxPoints, MaxPoints);
+        /// <summary>A well-fed, rested, warm, healthy player — the spawn state.</summary>
+        public static SurvivalState Full => FromPoints(MaxPoints, MaxPoints, MaxPoints, MaxPoints);
 
         public int HungerPoints => Hunger / FixedPerPoint;
         public int StaminaPoints => Stamina / FixedPerPoint;
         public int HealthPoints => Health / FixedPerPoint;
+        public int WarmthPoints => Warmth / FixedPerPoint;
 
         public bool IsStarving => Hunger == 0;
+        public bool IsFreezing => Warmth == 0;
         public bool IsDead => Health == 0;
     }
 
-    public static SurvivalState FromPoints(int hunger, int stamina, int health) => new(
+    public static SurvivalState FromPoints(int hunger, int stamina, int health, int warmth = MaxPoints) => new(
         ClampFixed(hunger * FixedPerPoint),
         ClampFixed(stamina * FixedPerPoint),
-        ClampFixed(health * FixedPerPoint));
+        ClampFixed(health * FixedPerPoint),
+        ClampFixed(warmth * FixedPerPoint));
 
     /// <summary>
     /// Advance the meters by <paramref name="ticks"/> whole ticks. Hunger drains
@@ -76,27 +92,40 @@ public static class SurvivalRules
     /// as it is crossed — this is what makes advancing by N identical to N
     /// single advances, the property the client and server rely on to agree.
     /// </summary>
-    public static SurvivalState Advance(SurvivalState state, int ticks, bool exerting = false)
+    /// <param name="warm">
+    /// Whether the player is warm this interval — true in daylight or near a heat
+    /// source, false when exposed at night. Warmth recovers when warm and drains
+    /// when cold; an empty warmth meter bleeds health like starvation does.
+    /// Defaults to true so callers that do not model exposure see no cold.
+    /// </param>
+    public static SurvivalState Advance(SurvivalState state, int ticks, bool exerting = false, bool warm = true)
     {
         if (ticks < 0) throw new ArgumentOutOfRangeException(nameof(ticks), "Time only moves forward.");
 
-        for (int i = 0; i < ticks; i++) state = Step(state, exerting);
+        for (int i = 0; i < ticks; i++) state = Step(state, exerting, warm);
         return state;
     }
 
-    private static SurvivalState Step(SurvivalState state, bool exerting)
+    private static SurvivalState Step(SurvivalState state, bool exerting, bool warm)
     {
         int hunger = Math.Max(0, state.Hunger - HungerLossPerTick);
 
-        int health = hunger == 0
-            ? Math.Max(0, state.Health - StarvationHealthLossPerTick)
-            : state.Health;
+        int warmth = warm
+            ? Math.Min(MaxFixed, state.Warmth + WarmthRegenPerTick)
+            : Math.Max(0, state.Warmth - WarmthLossPerTick);
+
+        // Starvation and freezing each bleed health, and they stack: an empty
+        // hunger and an empty warmth take the player down at the combined rate.
+        int healthLoss = 0;
+        if (hunger == 0) healthLoss += StarvationHealthLossPerTick;
+        if (warmth == 0) healthLoss += FreezingHealthLossPerTick;
+        int health = Math.Max(0, state.Health - healthLoss);
 
         int stamina = exerting
             ? state.Stamina
             : Math.Min(MaxFixed, state.Stamina + StaminaRegenPerTick);
 
-        return state with { Hunger = hunger, Stamina = stamina, Health = health };
+        return state with { Hunger = hunger, Stamina = stamina, Health = health, Warmth = warmth };
     }
 
     /// <summary>Eat an item: restore hunger by its food value, clamped to full.</summary>

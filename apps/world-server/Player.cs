@@ -55,6 +55,24 @@ public sealed class Player
     public bool Has(ItemId item, int amount = 1) => Inventory.GetValueOrDefault(item) >= amount;
 
     /// <summary>
+    /// The tier of the best held tool of class <paramref name="cls"/>, or 0 when
+    /// the player holds none (or <paramref name="cls"/> is None). Used to award a
+    /// harvest bonus for the right tool.
+    /// </summary>
+    public int ToolTierFor(ToolClass cls)
+    {
+        if (cls == ToolClass.None) return 0;
+
+        int best = 0;
+        foreach (var (item, count) in Inventory)
+        {
+            if (count <= 0 || !ItemCatalog.TryGet(item, out var def) || def.Tool != cls) continue;
+            if (def.ToolTier > best) best = def.ToolTier;
+        }
+        return best;
+    }
+
+    /// <summary>
     /// Removes one of <paramref name="item"/>. The caller has already checked the
     /// player holds it, so an empty stack here would be a server-side invariant
     /// violation — fail loudly rather than clamp.
@@ -71,8 +89,28 @@ public sealed class Player
         InventoryDirty = true;
     }
 
-    /// <summary>Drains survival meters by whole ticks using the shared rules.</summary>
-    public void AdvanceSurvival(int ticks) => Survival = SurvivalRules.Advance(Survival, ticks);
+    /// <summary>
+    /// Drains survival meters by whole ticks using the shared rules.
+    /// <paramref name="warm"/> is whether the player is warm this interval —
+    /// false when exposed at night, which drains warmth and, once it empties,
+    /// health.
+    /// </summary>
+    public void AdvanceSurvival(int ticks, bool warm) =>
+        Survival = SurvivalRules.Advance(Survival, ticks, warm: warm);
+
+    /// <summary>
+    /// Eats one <paramref name="item"/> if the player holds it and it is edible,
+    /// restoring hunger by the catalogued food value. Returns whether anything was
+    /// eaten, so the caller can ignore a non-food or absent item without effect.
+    /// </summary>
+    public bool Eat(ItemId item)
+    {
+        if (!ItemCatalog.IsFood(item) || !Has(item)) return false;
+
+        ConsumeOne(item);
+        Survival = SurvivalRules.Eat(Survival, ItemCatalog.Of(item).FoodValue);
+        return true;
+    }
 
     /// <summary>
     /// Seeds this player from a character loaded out of the gateway: its stored
@@ -86,7 +124,8 @@ public sealed class Player
             if (amount > 0 && Enum.TryParse<ItemId>(name, out var item))
                 Inventory[item] = amount;
         }
-        Survival = SurvivalRules.FromPoints(character.Hunger, character.Stamina, character.Health);
+        Survival = SurvivalRules.FromPoints(
+            character.Hunger, character.Stamina, character.Health, character.Warmth);
         InventoryDirty = true;
     }
 
@@ -97,6 +136,7 @@ public sealed class Player
         Hunger = Survival.HungerPoints,
         Stamina = Survival.StaminaPoints,
         Health = Survival.HealthPoints,
+        Warmth = Survival.WarmthPoints,
     };
 
     /// <summary>

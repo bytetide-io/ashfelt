@@ -19,7 +19,8 @@ public static class DesignSystem
     public static readonly Color Edge = new("0d0b08");    // hard 2px pixel outline
 
     public static readonly Color Parchment = new("ece3d2"); // primary text
-    public static readonly Color Muted = new("c9bda6");     // secondary text
+    public static readonly Color Muted = new("c9bda6");     // secondary body text
+    public static readonly Color LabelMuted = new("9c917c"); // Silkscreen kicker/labels
     public static readonly Color Faint = new("6b6252");     // captions
 
     // ---- Brand · Ember -------------------------------------------------
@@ -31,6 +32,7 @@ public static class DesignSystem
     // ---- Survival meters ----------------------------------------------
     public static readonly Color Hunger = new("c9822f");
     public static readonly Color Stamina = new("3f9d54");
+    public static readonly Color StaminaDeep = new("2b6e3a"); // shadow under green "eat" actions
     public static readonly Color Health = new("b83b3b");
     public static readonly Color Warmth = new("d6633c");
 
@@ -186,6 +188,26 @@ public static class DesignSystem
         box.SetBorderWidthAll(Outline);
         return box;
     }
+
+    /// <summary>A list card — recipe rows, the inventory detail row: dark fill, hard outline.</summary>
+    public static StyleBoxFlat Card(Color? fill = null, int pad = SpaceSm)
+    {
+        var box = new StyleBoxFlat
+        {
+            BgColor = fill ?? Ink800,
+            BorderColor = Edge,
+            ContentMarginLeft = pad,
+            ContentMarginRight = pad,
+            ContentMarginTop = pad,
+            ContentMarginBottom = pad,
+        };
+        box.SetBorderWidthAll(Outline);
+        return box;
+    }
+
+    /// <summary>The green "eat"/confirm action, e.g. EAT on a food row.</summary>
+    public static StyleBoxFlat GreenButton() => Chunky(Stamina, StaminaDeep);
+    public static StyleBoxFlat GreenButtonPressed() => ChunkyPressed(Stamina, StaminaDeep);
 
     /// <summary>Round control base (jump / menu): a dark disc with a lifted edge.</summary>
     public static StyleBoxFlat Round(Color? fill = null, int size = RoundButton)
