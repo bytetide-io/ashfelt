@@ -15,6 +15,7 @@ public sealed class World
 {
     private readonly TerrainGenerator _terrain;
     private readonly ConcurrentDictionary<(int X, int Y), TileType> _diffs = new();
+    private readonly ConcurrentDictionary<(int X, int Y), int> _harvestStrikes = new();
     private readonly ConcurrentDictionary<(int X, int Y), Structure> _structures = new();
     private long _nextStructureId = 1;
 
@@ -47,15 +48,44 @@ public sealed class World
     }
 
     /// <summary>
-    /// Attempts a harvest at a world tile. Returns the harvest result; when
-    /// <c>Allowed</c> is true the diff has been applied in memory and the
-    /// caller is responsible for persisting it.
+    /// The outcome of a single harvest strike. <c>Amount</c> of <c>Item</c> is
+    /// yielded on every allowed strike; the node only becomes <c>Becomes</c> once
+    /// <c>Felled</c>. <c>StrikesLeft</c> and <c>StrikesTotal</c> let a watcher show
+    /// how far along the felling is.
     /// </summary>
-    public HarvestRules.Harvest TryHarvest(int wx, int wy, ToolClass heldTool = ToolClass.None, int heldTier = 0)
+    public readonly record struct HarvestStrike(
+        bool Allowed, ItemId Item, int Amount, bool Felled, TileType Becomes, int StrikesLeft, int StrikesTotal);
+
+    /// <summary>
+    /// Applies one harvest strike to a world tile. Every allowed strike yields the
+    /// node's amount; the tile only converts to <c>Becomes</c> — and a diff is
+    /// recorded — on the strike that fells it. Partial progress lives only here in
+    /// memory: it is never a diff, so the seed+diffs invariant is untouched and a
+    /// half-chopped tree stands whole again after a restart. When <c>Felled</c> is
+    /// true the caller is responsible for persisting the diff.
+    /// </summary>
+    public HarvestStrike TryHarvest(int wx, int wy, ToolClass heldTool = ToolClass.None, int heldTier = 0)
     {
-        var result = HarvestRules.Evaluate(TileAt(wx, wy), heldTool, heldTier);
-        if (result.Allowed) _diffs[(wx, wy)] = result.Becomes;
-        return result;
+        var tile = TileAt(wx, wy);
+        var yield = HarvestRules.Evaluate(tile, heldTool, heldTier);
+        if (!yield.Allowed) return default;
+
+        int total = HarvestRules.HitsToFell(tile, heldTool, heldTier);
+        int struck = _harvestStrikes.GetValueOrDefault((wx, wy)) + 1;
+        bool felled = struck >= total;
+
+        if (felled)
+        {
+            _harvestStrikes.TryRemove((wx, wy), out _);
+            _diffs[(wx, wy)] = yield.Becomes;
+        }
+        else
+        {
+            _harvestStrikes[(wx, wy)] = struck;
+        }
+
+        return new HarvestStrike(
+            true, yield.Item, yield.Amount, felled, yield.Becomes, Math.Max(0, total - struck), total);
     }
 
     /// <summary>

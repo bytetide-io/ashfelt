@@ -18,22 +18,30 @@ public static class HarvestRules
     public readonly record struct Harvest(bool Allowed, ItemId Item, int Amount, TileType Becomes);
 
     /// <summary>
-    /// One gatherable tile: what it yields, what it turns into once gathered,
-    /// and which tool class speeds it. In stable declaration order.
+    /// One gatherable tile: what it yields per strike, how many strikes fell it,
+    /// what it turns into once felled, and which tool class speeds it. In stable
+    /// declaration order.
     /// </summary>
     public readonly record struct HarvestNodeDef(
         TileType Tile,
         ItemId Yields,
         int Amount,
+        int Hits,
         TileType Becomes,
         ToolClass PreferredTool);
 
+    /// <summary>
+    /// Strikes to fell a node bare-handed. Foraged plants come away in one grab;
+    /// a tree or a rock is real work, so mashing a sapling and felling an oak no
+    /// longer cost the same tap. A matching tool shaves strikes (see
+    /// <see cref="HitsToFell"/>), which is what finally makes an axe worth its wood.
+    /// </summary>
     public static readonly IReadOnlyList<HarvestNodeDef> Nodes = new HarvestNodeDef[]
     {
-        new(TileType.Forest, ItemId.Wood, 1, TileType.Grass, ToolClass.Axe),
-        new(TileType.Rock, ItemId.Stone, 1, TileType.Sand, ToolClass.Pickaxe),
-        new(TileType.Shrub, ItemId.Fiber, 1, TileType.Grass, ToolClass.None),
-        new(TileType.BerryBush, ItemId.Berry, 1, TileType.Grass, ToolClass.None),
+        new(TileType.Forest, ItemId.Wood, 1, 4, TileType.Grass, ToolClass.Axe),
+        new(TileType.Rock, ItemId.Stone, 1, 5, TileType.Sand, ToolClass.Pickaxe),
+        new(TileType.Shrub, ItemId.Fiber, 1, 1, TileType.Grass, ToolClass.None),
+        new(TileType.BerryBush, ItemId.Berry, 1, 1, TileType.Grass, ToolClass.None),
     };
 
     private static readonly IReadOnlyDictionary<TileType, HarvestNodeDef> ByTile =
@@ -55,6 +63,23 @@ public static class HarvestRules
             ? Math.Max(0, heldTier)
             : 0;
         return new Harvest(true, node.Yields, node.Amount + bonus, node.Becomes);
+    }
+
+    /// <summary>
+    /// How many strikes it takes to fell <paramref name="tile"/> holding a tool of
+    /// class <paramref name="heldTool"/> and tier <paramref name="heldTier"/>. A
+    /// matching tool removes one strike per tier — never below a single strike, so
+    /// the best axe still swings once — while a mismatched or absent tool leaves the
+    /// bare-handed cost. Non-harvestable tiles report zero.
+    /// </summary>
+    public static int HitsToFell(TileType tile, ToolClass heldTool = ToolClass.None, int heldTier = 0)
+    {
+        if (!ByTile.TryGetValue(tile, out var node)) return 0;
+
+        int reduction = node.PreferredTool != ToolClass.None && heldTool == node.PreferredTool
+            ? Math.Max(0, heldTier)
+            : 0;
+        return Math.Max(1, node.Hits - reduction);
     }
 
     public static bool IsHarvestable(TileType tile) => ByTile.ContainsKey(tile);

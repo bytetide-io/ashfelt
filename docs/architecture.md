@@ -66,8 +66,10 @@ the banded look. The HUD lives on a `CanvasLayer` *outside* the SubViewport so i
 composites at full resolution and stays crisp; `World3D` reaches the HUD and its
 status label by exported `NodePath` across the SubViewport boundary. Input is
 routed and coordinate-remapped into the SubViewport by the container, so the
-existing tap-to-harvest raycast (`GetViewport().GetCamera3D()`) needs no change —
-it already resolves against the SubViewport's camera and physics world.
+`GetViewport().GetCamera3D()` the gather reticle unprojects through resolves
+against the SubViewport's camera as expected. A tap gathers the reticled node —
+the nearest harvestable tile in reach, resolved each physics frame — rather than
+raycasting the tapped pixel, so hitting a tree never demands pixel-accurate aim.
 
 ### Movement authority: the client simulates, the server validates
 

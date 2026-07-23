@@ -14,6 +14,15 @@ public class WorldTests
         throw new Xunit.Sdk.XunitException($"no {type} tile found near origin");
     }
 
+    /// <summary>Strikes a node bare-handed until it falls, so tests that care about
+    /// the resulting diff need not know how many strikes the node takes.</summary>
+    private static void FellNode(World world, int x, int y)
+    {
+        for (int i = 0; i < 64; i++)
+            if (world.TryHarvest(x, y).Felled) return;
+        throw new Xunit.Sdk.XunitException($"node at ({x},{y}) never felled");
+    }
+
     [Fact]
     public void UnmodifiedWorld_MatchesGeneratedTerrain()
     {
@@ -26,22 +35,33 @@ public class WorldTests
     }
 
     [Fact]
-    public void ChoppingForest_YieldsWoodAndLeavesGrass()
+    public void ChoppingForest_TakesSeveralStrikesAndOnlyThenLeavesGrass()
     {
         var world = new World(1337);
         var (x, y) = FindTile(world, TileType.Forest);
+        int strikes = HarvestRules.HitsToFell(TileType.Forest);
+        Assert.True(strikes > 1, "a tree should take more than one strike");
 
-        var result = world.TryHarvest(x, y);
+        for (int i = 0; i < strikes - 1; i++)
+        {
+            var mid = world.TryHarvest(x, y);
+            Assert.True(mid.Allowed);
+            Assert.Equal(ItemId.Wood, mid.Item);
+            Assert.Equal(1, mid.Amount);
+            Assert.False(mid.Felled);
+            // Still a tree, and nothing persisted until it falls.
+            Assert.Equal(TileType.Forest, world.TileAt(x, y));
+            Assert.Equal(0, world.DiffCount);
+        }
 
-        Assert.True(result.Allowed);
-        Assert.Equal(ItemId.Wood, result.Item);
-        Assert.Equal(1, result.Amount);
+        var felling = world.TryHarvest(x, y);
+        Assert.True(felling.Felled);
         Assert.Equal(TileType.Grass, world.TileAt(x, y));
         Assert.Equal(1, world.DiffCount);
     }
 
     [Fact]
-    public void GatheringShrub_YieldsFiberAndLeavesGrass()
+    public void GatheringShrub_YieldsFiberInOneStrikeAndLeavesGrass()
     {
         var world = new World(1337);
         var (x, y) = FindTile(world, TileType.Shrub);
@@ -49,9 +69,24 @@ public class WorldTests
         var result = world.TryHarvest(x, y);
 
         Assert.True(result.Allowed);
+        Assert.True(result.Felled);
         Assert.Equal(ItemId.Fiber, result.Item);
         Assert.Equal(1, result.Amount);
         Assert.Equal(TileType.Grass, world.TileAt(x, y));
+    }
+
+    [Fact]
+    public void MatchingTool_FellsATreeInFewerStrikes()
+    {
+        int bare = HarvestRules.HitsToFell(TileType.Forest);
+        int withAxe = HarvestRules.HitsToFell(TileType.Forest, ToolClass.Axe, 1);
+        Assert.Equal(bare - 1, withAxe);
+
+        var world = new World(1337);
+        var (x, y) = FindTile(world, TileType.Forest);
+        for (int i = 0; i < withAxe - 1; i++)
+            Assert.False(world.TryHarvest(x, y, ToolClass.Axe, 1).Felled);
+        Assert.True(world.TryHarvest(x, y, ToolClass.Axe, 1).Felled);
     }
 
     [Fact]
@@ -72,7 +107,7 @@ public class WorldTests
     {
         var world = new World(7);
         var (x, y) = FindTile(world, TileType.Forest);
-        world.TryHarvest(x, y);
+        FellNode(world, x, y);
 
         var coord = World.ChunkOf(x, y);
         var chunk = world.GenerateChunk(coord);
@@ -88,7 +123,7 @@ public class WorldTests
     {
         var original = new World(2024);
         var (x, y) = FindTile(original, TileType.Forest);
-        original.TryHarvest(x, y);
+        FellNode(original, x, y);
 
         // Simulates a server restart: same seed, diffs replayed from storage.
         var restored = new World(2024);

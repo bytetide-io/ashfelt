@@ -40,8 +40,13 @@ entire player experience is:
    should be *the* pressure that gives the campfire and walls a reason to exist.
 5. **No goals or progression.** No skills (despite the pitch), no unlocks, no
    reason to return to a session. Nothing to be *getting better at*.
-6. **Harvest lacks depth.** One tap, one resource, instant, fixed yield. No
-   node variety, no yield variance, no tool tiers, no timing/interaction.
+6. **Harvest lacks depth.** ~~One tap, one resource, instant.~~ Nodes now have
+   durability: a shrub or berry bush forages in one tap, a tree takes four
+   strikes and a rock five, and a matching tool shaves a strike per tier
+   (`HarvestNodeDef.Hits`, `HarvestRules.HitsToFell`). Partial progress is
+   transient server state broadcast as `HarvestProgress` so the node visibly
+   wears down; only the felling strike writes a diff. **Remaining:** yield
+   variance, and node/tool *tiers* beyond the first.
 
 None of these need architecture changes — they need content and a few new
 shared rules. But adding them naively means more hardcoded `switch` statements,
@@ -61,8 +66,9 @@ the minimum that turns the demo into a game.
 > **Progress.** Food & eating ✅ (BerryBush → Berry → EatRequest), functional
 > campfire as a warmth source ✅, night pressure ✅ (a warmth meter that drains
 > when exposed after dark and bleeds health at zero), and tools boosting harvest
-> ✅ (a tool matching a node's `PreferredTool` adds its tier to the yield; bare
-> hands still work so tools stay bootstrappable). **Remaining:** the campfire as
+> ✅ (a tool matching a node's `PreferredTool` adds its tier to the per-strike
+> yield *and* shaves a strike off felling it; bare hands still work so tools stay
+> bootstrappable). **Remaining:** the campfire as
 > a *cooking* station (needs a raw→cooked food pair) — a natural bridge into
 > Phase B/C, since raw meat arrives with creatures.
 

@@ -30,13 +30,24 @@ public partial class World3D : Node3D
     private TerrainGenerator _terrain = null!;
     private readonly List<MultiMesh> _foliage = new();
 
-    /// <summary>One drawn instance inside a MultiMesh, so a harvested tile's
-    /// tree or shrub can be collapsed out of view when the server confirms it.</summary>
-    private readonly record struct FoliageRef(MultiMesh Mesh, int Index);
+    /// <summary>One drawn instance inside a MultiMesh, with the full-size transform
+    /// it was built at. A harvested tile's tree or shrub shrinks toward nothing as
+    /// it is struck and collapses out of view when finally felled — both scale the
+    /// stored original, so repeated strikes never compound.</summary>
+    private readonly record struct FoliageRef(MultiMesh Mesh, int Index, Transform3D Original);
 
-    /// <summary>Every foliage instance a tile owns, so applying a TileChanged
-    /// hides exactly the visuals for that tile and nothing else.</summary>
+    /// <summary>Every foliage instance a tile owns, so a harvest strike or felling
+    /// touches exactly the visuals for that tile and nothing else.</summary>
     private readonly Dictionary<(int, int), List<FoliageRef>> _foliageByTile = new();
+
+    /// <summary>Client-side tile diffs, mirroring the server's seed+diffs rule: a
+    /// harvested tile reverts here too, so the gather reticle and tap both read the
+    /// tile as it now is rather than the pristine generated terrain. Without this
+    /// the client keeps offering to gather an already-felled node.</summary>
+    private readonly Dictionary<(int, int), TileType> _tileDiffs = new();
+
+    private TileType EffectiveTile(int x, int y) =>
+        _tileDiffs.TryGetValue((x, y), out var tile) ? tile : _terrain.TileAt(x, y);
 
     /// <summary>Placed structures already rendered, keyed by server id so the
     /// join backfill and live broadcasts never draw the same one twice.</summary>
@@ -95,6 +106,8 @@ public partial class World3D : Node3D
             CallDeferred(nameof(OnStructurePlaced), id, (int)kind, tx, ty);
         _connection.TileChanged += (tx, ty, tile) =>
             CallDeferred(nameof(OnTileChanged), tx, ty, (int)tile);
+        _connection.HarvestProgress += (tx, ty, left, total) =>
+            CallDeferred(nameof(OnHarvestProgress), tx, ty, left, total);
         ShowStatus(_connection.Status);
     }
 
@@ -144,6 +157,7 @@ public partial class World3D : Node3D
         _worldRoot.QueueFree();
         _foliage.Clear();
         _foliageByTile.Clear();
+        _tileDiffs.Clear();
         _structures.Clear();
         _remotes.Clear();
     }
@@ -425,7 +439,7 @@ public partial class World3D : Node3D
     {
         if (!_foliageByTile.TryGetValue(tile, out var refs))
             _foliageByTile[tile] = refs = new List<FoliageRef>();
-        refs.Add(new FoliageRef(mesh, index));
+        refs.Add(new FoliageRef(mesh, index, mesh.GetInstanceTransform(index)));
     }
 
     /// <summary>A press that travels less than this before release is a tap
@@ -434,13 +448,17 @@ public partial class World3D : Node3D
 
     private bool _touching;
     private Vector2 _touchStart;
-    private Vector2? _pendingTap;
+    private bool _harvestQueued;
+
+    /// <summary>The nearest harvestable tile in reach, resolved each physics frame
+    /// for the reticle. A tap gathers this rather than whatever pixel the thumb
+    /// landed on, so hitting a tree never demands pixel-accurate aim.</summary>
+    private (int X, int Y)? _gatherTarget;
 
     /// <summary>
-    /// Classifies a touch (or editor mouse click) as a tap. The screen position
-    /// is banked and resolved in <see cref="_PhysicsProcess"/>, where the physics
-    /// space state is safe to query. Camera drags reach OrbitCamera as usual —
-    /// nothing here marks the event handled.
+    /// Classifies a touch (or editor mouse click) as a tap. A tap gathers the
+    /// currently reticled node; the resolution happens in <see cref="_PhysicsProcess"/>.
+    /// Camera drags reach OrbitCamera as usual — nothing here marks the event handled.
     /// </summary>
     public override void _UnhandledInput(InputEvent @event)
     {
@@ -467,16 +485,19 @@ public partial class World3D : Node3D
     {
         if (!_touching) return;
         _touching = false;
-        if (position.DistanceTo(_touchStart) <= TapMaxTravelPixels) _pendingTap = position;
+        if (position.DistanceTo(_touchStart) <= TapMaxTravelPixels) _harvestQueued = true;
     }
 
     public override void _PhysicsProcess(double delta)
     {
         UpdateGatherPrompt();
 
-        if (_pendingTap is not { } tap) return;
-        _pendingTap = null;
-        TryHarvestAt(tap);
+        if (!_harvestQueued) return;
+        _harvestQueued = false;
+
+        // Input is a request, never a state change: the tile does not change here.
+        // The server's TileChanged / HarvestProgress is what wears down the node.
+        if (_gatherTarget is { } target) _connection.SendChop(target.X, target.Y);
     }
 
     /// <summary>
@@ -487,9 +508,9 @@ public partial class World3D : Node3D
     /// </summary>
     private void UpdateGatherPrompt()
     {
-        if (!_built) { _hud.HideGatherPrompt(); return; }
+        if (!_built) { _gatherTarget = null; _hud.HideGatherPrompt(); return; }
         var camera = GetViewport().GetCamera3D();
-        if (camera is null) { _hud.HideGatherPrompt(); return; }
+        if (camera is null) { _gatherTarget = null; _hud.HideGatherPrompt(); return; }
 
         float metres = (float)TerrainGenerator.TileMetres;
         float range = (float)Proto.Tuning.ChopRangeMetres;
@@ -505,7 +526,7 @@ public partial class World3D : Node3D
         for (int dx = -radius; dx <= radius; dx++)
         {
             int tileX = playerTileX + dx, tileY = playerTileY + dy;
-            if (!HarvestRules.IsHarvestable(_terrain.TileAt(tileX, tileY))) continue;
+            if (!HarvestRules.IsHarvestable(EffectiveTile(tileX, tileY))) continue;
 
             float centreX = (float)((tileX + 0.5) * metres);
             float centreZ = (float)((tileY + 0.5) * metres);
@@ -518,7 +539,9 @@ public partial class World3D : Node3D
             found = true;
         }
 
-        if (!found) { _hud.HideGatherPrompt(); return; }
+        if (!found) { _gatherTarget = null; _hud.HideGatherPrompt(); return; }
+
+        _gatherTarget = (bestX, bestY);
 
         float worldX = (float)((bestX + 0.5) * metres);
         float worldZ = (float)((bestY + 0.5) * metres);
@@ -531,94 +554,8 @@ public partial class World3D : Node3D
         Vector2 hudSize = _hud.Size;
         Vector2 scale = subSize == Vector2.Zero ? Vector2.One : hudSize / subSize;
 
-        var tile = _terrain.TileAt(bestX, bestY);
+        var tile = EffectiveTile(bestX, bestY);
         _hud.ShowGatherPrompt(viewportPoint * scale, HarvestRules.Evaluate(tile).Item);
-    }
-
-    /// <summary>How far a harvest ray is allowed to travel before giving up.</summary>
-    private const float HarvestRayLengthMetres = 500f;
-
-    /// <summary>
-    /// Turns a screen tap into a ChopRequest: raycast to the ground, resolve the
-    /// tile, and — only if it is harvestable and within reach — ask the server.
-    /// The tile does not change here; the server's TileChanged is what removes
-    /// the foliage. Input is a request, never a state change.
-    /// </summary>
-    private void TryHarvestAt(Vector2 screen)
-    {
-        if (!_built) return;
-
-        var camera = GetViewport().GetCamera3D();
-        if (camera is null) return;
-
-        Vector3 origin = camera.ProjectRayOrigin(screen);
-        Vector3 direction = camera.ProjectRayNormal(screen);
-        if (!TryGroundHit(origin, direction, out Vector3 hit)) return;
-
-        float metres = (float)TerrainGenerator.TileMetres;
-        int tileX = Mathf.FloorToInt(hit.X / metres);
-        int tileY = Mathf.FloorToInt(hit.Z / metres);
-
-        if (!HarvestRules.IsHarvestable(_terrain.TileAt(tileX, tileY))) return;
-
-        float centreX = (float)((tileX + 0.5) * metres);
-        float centreZ = (float)((tileY + 0.5) * metres);
-        Vector3 player = _player.GlobalPosition;
-        float dx = player.X - centreX, dz = player.Z - centreZ;
-        if (dx * dx + dz * dz > Proto.Tuning.ChopRangeMetres * Proto.Tuning.ChopRangeMetres) return;
-
-        _connection.SendChop(tileX, tileY);
-    }
-
-    /// <summary>
-    /// Finds where a camera ray meets the ground. Prefers the terrain's trimesh
-    /// colliders; if the ray somehow misses them it bisects against the analytic
-    /// height field, so a tap always resolves to a point on the surface.
-    /// </summary>
-    private bool TryGroundHit(Vector3 origin, Vector3 direction, out Vector3 hit)
-    {
-        var query = PhysicsRayQueryParameters3D.Create(
-            origin, origin + direction * HarvestRayLengthMetres);
-        var result = GetWorld3D().DirectSpaceState.IntersectRay(query);
-        if (result.Count > 0)
-        {
-            hit = (Vector3)result["position"];
-            return true;
-        }
-
-        return TryMarchGround(origin, direction, out hit);
-    }
-
-    /// <summary>Marches the ray until it dips below the height field, then bisects
-    /// to the crossing — a fallback for when no collider is hit.</summary>
-    private bool TryMarchGround(Vector3 origin, Vector3 direction, out Vector3 hit)
-    {
-        const float step = 1.0f;
-        double metres = TerrainGenerator.TileMetres;
-
-        float previous = 0f;
-        for (float t = step; t <= HarvestRayLengthMetres; t += step)
-        {
-            Vector3 point = origin + direction * t;
-            double ground = _terrain.HeightAt(point.X / metres, point.Z / metres);
-            if (point.Y <= ground)
-            {
-                float lo = previous, high = t;
-                for (int i = 0; i < 16; i++)
-                {
-                    float mid = (lo + high) * 0.5f;
-                    Vector3 p = origin + direction * mid;
-                    if (p.Y <= _terrain.HeightAt(p.X / metres, p.Z / metres)) high = mid;
-                    else lo = mid;
-                }
-                hit = origin + direction * high;
-                return true;
-            }
-            previous = t;
-        }
-
-        hit = Vector3.Zero;
-        return false;
     }
 
     /// <summary>
@@ -630,15 +567,38 @@ public partial class World3D : Node3D
     private void OnTileChanged(int tileX, int tileY, int tile)
     {
         if (!_built) return;
+
+        // Record the diff so the reticle and tap stop treating this tile as the
+        // node it used to be — the fix for re-tapping a felled stump forever.
+        _tileDiffs[(tileX, tileY)] = (TileType)tile;
+
         if (!_foliageByTile.TryGetValue((tileX, tileY), out var refs)) return;
 
         var collapsed = new Basis(Vector3.Zero, Vector3.Zero, Vector3.Zero);
-        foreach (var (mesh, index) in refs)
-        {
-            Vector3 origin = mesh.GetInstanceTransform(index).Origin;
-            mesh.SetInstanceTransform(index, new Transform3D(collapsed, origin));
-        }
+        foreach (var reference in refs)
+            reference.Mesh.SetInstanceTransform(
+                reference.Index, new Transform3D(collapsed, reference.Original.Origin));
         _foliageByTile.Remove((tileX, tileY));
+    }
+
+    /// <summary>
+    /// A node was struck but not yet felled: shrink its foliage toward nothing in
+    /// proportion to the strikes left, so a tree visibly comes down over several
+    /// taps instead of vanishing in one. Scaling the stored original keeps repeated
+    /// strikes from compounding.
+    /// </summary>
+    private void OnHarvestProgress(int tileX, int tileY, int strikesLeft, int strikesTotal)
+    {
+        if (!_built || strikesTotal <= 0) return;
+        if (!_foliageByTile.TryGetValue((tileX, tileY), out var refs)) return;
+
+        float factor = Mathf.Clamp(strikesLeft / (float)strikesTotal, 0f, 1f);
+        foreach (var reference in refs)
+        {
+            var original = reference.Original;
+            var shrunk = new Transform3D(original.Basis.Scaled(Vector3.One * factor), original.Origin);
+            reference.Mesh.SetInstanceTransform(reference.Index, shrunk);
+        }
     }
 
     /// <summary>How far ahead of the player a structure is placed, in tiles.</summary>

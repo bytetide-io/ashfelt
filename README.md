@@ -76,9 +76,13 @@ world-server, Postgres schema, CI.
 
 **Phase 2 complete** — the survival loop plays end to end:
 
-- **tap to harvest** in the 3D client: tap a tree, rock or shrub within reach →
-  the server authorises it → the tree/shrub vanishes and you receive wood, stone
-  or fiber (`Shrub` tiles scattered through grassland are the fiber source)
+- **tap to harvest** in the 3D client: tap gathers the reticled node — the
+  nearest tree, rock or shrub in reach — and the server authorises it. Nodes have
+  durability: a shrub or berry bush comes away in one tap, a tree takes four
+  strikes and a rock five (a matching axe/pickaxe shaves a strike per tier), and
+  the node visibly wears down each strike before it finally falls and yields its
+  wood, stone or fiber (`Shrub` tiles scattered through grassland are the fiber
+  source)
 - deterministic **crafting** (`sim-core/CraftingRules`): recipes turn harvested
   wood/stone/fiber into planks, tools, rope, walls and a campfire; the server
   authorises each craft, the client shows a touch crafting panel

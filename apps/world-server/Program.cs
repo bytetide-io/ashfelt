@@ -202,23 +202,42 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // preferred class, then how good a tool of that class the player holds.
             var preferredTool = HarvestRules.PreferredTool(world.TileAt(tx, ty));
             int toolTier = player.ToolTierFor(preferredTool);
-            var harvest = world.TryHarvest(tx, ty, preferredTool, toolTier);
-            if (!harvest.Allowed) break;
+            var strike = world.TryHarvest(tx, ty, preferredTool, toolTier);
+            if (!strike.Allowed) break;
 
-            player.Give(harvest.Item, harvest.Amount);
-            // Fire-and-forget the write: the diff is already authoritative in
-            // memory, and stalling the packet loop on the database would stall
-            // every other player.
-            _ = store.SaveDiffAsync(tx, ty, harvest.Becomes);
+            // Every strike drops resource; a tree just takes several before it
+            // falls. Marking the inventory dirty lets the count tick up per hit.
+            player.Give(strike.Item, strike.Amount);
 
-            writer.Reset();
-            writer.Put((byte)MessageId.TileChanged);
-            writer.Put(tx);
-            writer.Put(ty);
-            writer.Put((byte)harvest.Becomes);
-            Broadcast(writer);
+            if (strike.Felled)
+            {
+                // Fire-and-forget the write: the diff is already authoritative in
+                // memory, and stalling the packet loop on the database would stall
+                // every other player.
+                _ = store.SaveDiffAsync(tx, ty, strike.Becomes);
 
-            Console.WriteLine($"[world] player {player.Id} harvested {harvest.Item} at ({tx},{ty})");
+                writer.Reset();
+                writer.Put((byte)MessageId.TileChanged);
+                writer.Put(tx);
+                writer.Put(ty);
+                writer.Put((byte)strike.Becomes);
+                Broadcast(writer);
+            }
+            else
+            {
+                // Not felled yet: tell everyone how worn the node is so it visibly
+                // wears down under the strikes. This is transient — never persisted.
+                writer.Reset();
+                writer.Put((byte)MessageId.HarvestProgress);
+                writer.Put(tx);
+                writer.Put(ty);
+                writer.Put((byte)strike.StrikesLeft);
+                writer.Put((byte)strike.StrikesTotal);
+                Broadcast(writer);
+            }
+
+            Console.WriteLine($"[world] player {player.Id} struck {strike.Item} at ({tx},{ty}) " +
+                              (strike.Felled ? "(felled)" : $"({strike.StrikesLeft} left)"));
             break;
         }
 

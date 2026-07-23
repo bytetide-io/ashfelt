@@ -32,6 +32,10 @@ public partial class WorldConnection : Node
     public event Action<IReadOnlyList<PlayerState>>? PlayersUpdated;
     public event Action<int>? PlayerLeft;
     public event Action<int, int, TileType>? TileChanged;
+
+    /// <summary>(tileX, tileY, strikes remaining, strikes total) — a node worn down
+    /// but not yet felled, so the client can show it taking the hit.</summary>
+    public event Action<int, int, int, int>? HarvestProgress;
     public event Action<IReadOnlyDictionary<ItemId, int>>? InventoryUpdated;
 
     /// <summary>(structure id, kind, tileX, tileY) — a structure to render.</summary>
@@ -346,6 +350,14 @@ public partial class WorldConnection : Node
             {
                 int tx = reader.GetInt(), ty = reader.GetInt();
                 TileChanged?.Invoke(tx, ty, (TileType)reader.GetByte());
+                break;
+            }
+
+            case MessageId.HarvestProgress:
+            {
+                int tx = reader.GetInt(), ty = reader.GetInt();
+                int left = reader.GetByte(), total = reader.GetByte();
+                HarvestProgress?.Invoke(tx, ty, left, total);
                 break;
             }
 

@@ -66,6 +66,15 @@ public enum MessageId : byte
     /// <summary>Authoritative snapshot of every player in interest range.</summary>
     PlayerStates = 102,
     PlayerLeft = 103,
+    /// <summary>
+    /// A node was struck but not yet felled. Layout: int tileX, int tileY, byte
+    /// strikes remaining, byte strikes total. Broadcast on every non-felling
+    /// harvest strike so watchers can show the node wearing down; the felling
+    /// strike sends <see cref="TileChanged"/> instead. Purely presentational —
+    /// partial progress is transient server state, never a persisted diff.
+    /// </summary>
+    HarvestProgress = 111,
+
     /// <summary>A tile diff was applied; clients overlay it on generated terrain.</summary>
     TileChanged = 104,
     /// <summary>Authoritative inventory for the receiving player.</summary>
@@ -110,7 +119,7 @@ public enum MessageId : byte
 public static class ProtocolVersion
 {
     /// <summary>Bumped whenever message layout changes. Mismatched peers are rejected.</summary>
-    public const int Current = 9;
+    public const int Current = 10;
 }
 
 /// <summary>Item kinds. Values are wire-stable — append only, never renumber.</summary>
