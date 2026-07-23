@@ -161,8 +161,22 @@ rise out of nothing while the owner sees the whole plan.
   with live validity (illegal ghosts glow red) and a running cost readout, commit,
   and buildground **deposit/build** actions when standing at an owned site.
 
+A finished building now **matters for survival**:
+
+- **shelter** — standing under a built roof keeps you warm at night, exactly as a
+  lit campfire does (`BuildSite.HasBuiltRoofOver`), and a fiber **thatch roof**
+  gives a first-night shelter before planks exist.
+- **health regenerates** when you are both warm and well-fed
+  (`SurvivalRules` `HealthRegenPerMinute` / `WellFedPoints`) — so food and shelter
+  recover you, not merely delay death.
+- **walls enclose** — obstacles are now solid. `MovementRules` (with
+  `IMovementObstacles`) stops a player at trees, built walls and placed
+  structures, server-authoritative and matched by the client's own colliders, so
+  an enclosed, roofed hut is a real refuge.
+
 Still open: a free-pan **architect camera** (v1 places pieces in front of the
-player), multi-storey building, cooking, and the enclosure→warmth payoff.
+player), multi-storey building, cooking, rock/water terrain collision, and
+resource/material depth (ore, clay, refining stations).
 
 See `docs/architecture.md` before adding anything; the invariants there
 (server-authoritative, seed+diffs, one shared sim library) are load-bearing.
