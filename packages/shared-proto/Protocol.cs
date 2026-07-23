@@ -139,6 +139,65 @@ public enum ItemId : byte
     Berry = 10,
 }
 
+/// <summary>
+/// A category of building piece in the modular blueprint system. Values are
+/// wire-stable — append only, never renumber — because a committed blueprint
+/// stores them and streams them to the client.
+/// </summary>
+public enum BuildPieceKind : byte
+{
+    None = 0,
+    /// <summary>Sits on the ground; everything else builds off it.</summary>
+    Foundation = 1,
+    /// <summary>A solid wall on a cell edge; blocks movement, encloses.</summary>
+    Wall = 2,
+    /// <summary>A wall with a passable gap; encloses without blocking.</summary>
+    Doorway = 3,
+    /// <summary>A wall with a glazed opening; blocks movement, encloses.</summary>
+    Window = 4,
+    /// <summary>A walkable surface at an upper level; the floor of a storey above.</summary>
+    Floor = 5,
+    /// <summary>A vertical post; carries a roof or upper floor without a full wall.</summary>
+    Pillar = 6,
+    /// <summary>A cover over a cell; the piece that makes a space count as sheltered.</summary>
+    Roof = 7,
+}
+
+/// <summary>
+/// The material a piece is built from — its tier and look. Wire-stable, append
+/// only. The concrete item cost of a (<see cref="BuildPieceKind"/>,
+/// <see cref="BuildMaterial"/>) pair lives in the sim-core structure catalog, so
+/// the wire only ever carries the pair, never the cost.
+/// </summary>
+public enum BuildMaterial : byte
+{
+    None = 0,
+    Wood = 1,
+    Stone = 2,
+}
+
+/// <summary>
+/// Where in a cell a piece sits. A cell holds at most one piece per layer, which
+/// is what lets four walls, a floor, a roof and a post coexist on one tile
+/// without ambiguity. Wall layers name a cell *edge*; the edge shared by two
+/// cells is one physical wall, so slots are canonicalised (see the sim-core
+/// <c>PieceSlot</c>) to a single owner. Wire-stable, append only.
+/// </summary>
+public enum PieceLayer : byte
+{
+    None = 0,
+    /// <summary>Foundation or floor — the walkable base of the cell.</summary>
+    Ground = 1,
+    WallNorth = 2,
+    WallEast = 3,
+    WallSouth = 4,
+    WallWest = 5,
+    /// <summary>A roof covering the cell.</summary>
+    Cover = 6,
+    /// <summary>A pillar/post at the cell centre.</summary>
+    Post = 7,
+}
+
 public static class Tuning
 {
     /// <summary>Server tick rate for simulation and state broadcast.</summary>
