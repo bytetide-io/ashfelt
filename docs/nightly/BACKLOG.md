@@ -1,94 +1,114 @@
 # Nightly backlog
 
-Ranked ideas and findings not built/fixed yet. Score = Severity(1-5) ×
-Blast radius(1-5), computed the way `docs/nightly/LOG.md`'s audit protocol
-defines them. Pick highest score first unless it's stale (re-check before
-trusting an old score — the codebase moves).
+Ranked ideas and findings not yet built/fixed, newest audit first. Score is
+Severity(1-5) × Blast radius(1-5) at the time it was logged — re-score if you
+suspect the codebase has moved since.
 
-## Open findings
+## From 2026-07-24 audit
 
-### 1. Interest management is declared but not implemented — score 9
-`Tuning.InterestRadiusChunks` (`packages/shared-proto/Protocol.cs`) exists and
-`MessageId.PlayerStates`'s doc comment claims "every player in interest
-range," but `apps/world-server/Program.cs`'s tick loop broadcasts every
-connected player's position to every other connected player, every tick, with
-no distance filter at all. Harmless correctness-wise at today's player counts
-(one small dev world), but: (a) it's a documented invariant
-(`docs/architecture.md` #6, `CLAUDE.md` "Interest management") that the code
-doesn't honor, and (b) bandwidth is O(N) per player / O(N²) server-wide with
-no cap. Fix: filter `PlayerStates` (and eventually chunk pushes) to peers
-within `InterestRadiusChunks` of the recipient, or delete the constant and the
-doc comment's claim if interest management is deliberately deferred. Severity
-3 (doc/impl mismatch on a load-bearing invariant) × blast radius 3 (every
-player, but no current symptom) = 9.
+### Multiplayer correctness
 
-### 2. No schema migration path — score 9
-`infra/migrations/*.sql` only runs via Postgres' `/docker-entrypoint-initdb.d`
-first-init hook — it is never re-applied to an existing data volume. Anyone
-who created their `pgdata` volume before a given migration file existed never
-gets it applied automatically (confirmed for `004_warmth.sql`'s `ALTER TABLE`).
-No version table, no migration runner. Not urgent while there's no real
-player data, but every future schema change has the same silent-no-op risk,
-and it will eventually corrupt someone's dev/staging environment in a
-confusing way (missing column errors at runtime, not at migration time).
-Fix: adopt a real migration runner (even a minimal one — a `schema_migrations`
-table + "run any .sql not yet recorded, in order, on world-server/gateway
-startup" is enough) before Phase 4 adds the next schema change. Severity 3 ×
-blast radius 3 = 9.
+- **[FIXED 2026-07-24]** ~~No ownership check on normal (non-voyage)
+  character load, letting the same character UUID be loaded concurrently by
+  two sessions~~ — see `LOG.md`. Leaving the entry struck through rather than
+  deleted per the "never silently repeat/undo, and log what you found"
+  discipline — this is the one thing tonight's session fixed.
 
-### 3. `World3D.cs` is a 735-line god-scene-in-code — score 6
-Single `_Ready` wires together `WorldConnection`, `PlayerBody`, `RemotePlayers`,
-`SurvivalHud`, day/night lighting, tap-to-harvest input resolution, and
-structure rendering. Works, and each piece is a well-named private method —
-but it's the "a node that knows about more than ~3 systems" smell called out
-in the nightly audit brief. Candidate split: pull day/night (`AdvanceClock`/
-`UpdateSky`/`SunArcTilt` etc.) into a `DayNightController` node, and the
-tap-to-harvest input resolution (`BeginTap`/`EndTap`/`UpdateGatherPrompt`)
-into a `HarvestInteractor` node, leaving `World3D` as pure world-build +
-wiring. Severity 2 × blast radius 3 = 6.
+- **World-server blocks its single packet/tick thread on gateway HTTP calls**
+  (`apps/world-server/Program.cs:121,144,322-325` — `Hello` and
+  `RequestRelease` both call `.GetAwaiter().GetResult()` on an HTTP round
+  trip). Score: Severity 4 × Blast radius 5 = **20**. A slow or unreachable
+  gateway freezes movement/harvest/tick broadcasts for *every* connected
+  player, on every join and every voyage — this is not a rare edge case, it's
+  the common path. Not fixed tonight: the correct fix is a real architecture
+  change (kick off the HTTP call as a real `Task`, park the connecting peer
+  in a "pending" state that only skips gameplay messages, and drain
+  completions from a thread-safe queue on the next tick so `PollEvents()`
+  cadence for everyone else is never blocked). That's a bigger, riskier
+  change than "ship one thing and be done" allows for a single night, and it
+  deserves its own dedicated session with room to actually reason about the
+  pending-state lifecycle (what happens if the peer disconnects mid-claim,
+  etc.) rather than being squeezed in alongside another fix.
 
-### 4. `SurvivalHud.cs` is a 940-line UI god-script — score 4
-No `.tscn` scene backs the HUD; every control is built in code. That's a
-deliberate, documented choice (icons/design tokens are data, not files —
-see `docs/architecture.md`), but the result is one class owning meters,
-hotbar, the crafting sheet, the build sheet, the travel list and the item
-grid. Candidate split: one `Control` subclass per sheet tab
-(`CraftSheet`, `BuildSheet`, `TravelSheet`), composed by a slimmer
-`SurvivalHud`. Lower priority than #3 — it's flat and repetitive rather than
-tangled, so the maintenance cost is real but not urgent. Severity 2 × blast
-radius 2 = 4.
+### Mobile performance
 
-### 5. Zero netcode/integration test coverage — score 9 (testing category)
-`tests/sim-core.tests` covers the deterministic core well, but
-`apps/world-server/Program.cs`, `apps/gateway/Program.cs` and the client's
-`WorldConnection` have no automated tests at all. Tonight's bug (missing
-tile-diff backfill on join) lived exactly here and would have been caught by
-a thin two-fake-clients integration test. Recommend a `tests/world-server.tests`
-project that spins up a real `NetManager` server + one or two bare LiteNetLib
-client sockets (no Godot needed) and asserts on wire messages — start with
-"second client joining after a harvest gets a `TileChanged` backfill for it."
-Severity 3 × blast radius 3 = 9. (Logged, not auto-fixed: this is a testing
-gap, not itself a live multiplayer-correctness bug, so it doesn't trigger the
-audit's mandatory-fix rule — but it's exactly what let tonight's real bug
-through the CI unnoticed. Strong candidate for tomorrow night.)
+- **`World3D.UpdateGatherPrompt` (`apps/client/scripts/world3d/World3D.cs:491-559`)**
+  runs an unconditional 7×7-tile scan every physics tick (60/sec), each tile
+  costing a multi-octave FBM height sample plus 1-3 `Noise.Hash` calls via
+  `sim-core.TerrainGenerator`. Runs even while standing still and even while
+  the action sheet hides the visual prompt. Score: Severity 4 × Blast radius
+  3 = **12**. Fix: cache the player's current tile coordinate and early-return
+  when it hasn't changed since the last physics frame; skip the scan entirely
+  while the action sheet is open.
 
-### 6. Dead `RequestChunk` / `ChunkData` wire path — score 1
-`WorldConnection.RequestChunk()` and the `ChunkReceived` event are never
-called/subscribed by anything in `apps/client` — `World3D.Build()` generates
-its whole radius from the seed locally instead. Leftover from the pre-3D
-tilemap client. The world-server still serves `RequestChunk` correctly, so
-it's inert, not broken — but it's dead protocol surface that will mislead
-whoever next assumes chunk-streaming is how terrain reaches the client.
-Fix: either delete the dead path, or repurpose it as the actual mechanism for
-extending world radius beyond what's built at join (useful once worlds get
-larger than a fixed `Radius`). Severity 1 × blast radius 1 = 1.
+### Architecture / maintainability
 
-## Ideas (not yet scored as findings — future feature nights)
+- **`SurvivalHud.cs` is 940 lines** (`apps/client/scripts/ui/SurvivalHud.cs`
+  per the client audit — grown from the 419 cited in
+  `docs/gameplay-roadmap.md` §3.4, not shrunk). One class builds 4 survival
+  meters, the day/night chip, touch stick + jump button, hotbar, gather
+  prompt, and a full tabbed action sheet (inventory/craft/build/travel) with
+  its own tab state machine and business logic (`RefreshActionAvailability`
+  calling `CraftingRules.CanCraft` directly). No reusable meter/slot widget
+  exists — `AddMeter`, `HotbarSlotFor`, `GridSlot`, `BuildCraftCard`,
+  `BuildPlaceCard` each hand-build near-identical layouts. Score: Severity 3
+  × Blast radius 3 = **9**. Fix: extract a `MeterRow` and one `ItemSlot`
+  widget reused by hotbar/inventory/craft/place; split the action sheet into
+  its own scene/controller (roadmap §3.4).
 
-- A feature-night candidate that satisfies the vision checklist well: **corpse
-  scent draws predators** (simulated, not decorative — attracts based on
-  world state, not a scripted spawn), composes with the existing harvest/
-  survival systems, and creates real player-vs-player tension (a kill or a
-  death near you is now a liability, not just a loot pile). Deferred because
-  tonight's audit found a must-fix bug first (see `LOG.md`) — the audit
-  protocol says skip the feature phase entirely when that happens.
+- **`World3D.cs` is 735 lines**, up from 616, mixing net dispatch, day/night
+  lighting, procedural foliage generation, touch-input classification,
+  harvest-target scanning, and structure placement/mesh building in one
+  script. Score: Severity 3 × Blast radius 3 = **9**. Fix: split per roadmap
+  §3.4 into separate nodes/systems World3D composes.
+
+- **`WorldConnection.cs:299-420` `OnReceive`** is a 12-case hand-decoded
+  switch on `MessageId` with wire order that must exactly match the server's
+  writer with no compile-time check. Score: Severity 3 × Blast radius 3 = **9**.
+  Fix: per-message `Read`/`Write` static pairs in `shared-proto` (roadmap
+  §3.2), then a dispatch table here.
+
+- **`World3D.CollectTrees`/`CollectShrubs`/`CollectBerryBushes`
+  (`apps/client/scripts/world3d/World3D.cs:325-436`)** triplicate the same
+  loop/sample/jitter/place pattern, differing only in density constant and
+  offset scale. Score: Severity 3 × Blast radius 2 = **6**. Fix: one
+  `CollectFoliage(TileType, perTile, saltBase, place)` helper — due per
+  CLAUDE.md's "third occurrence is a refactor," and Phase C will add more
+  foliage types on this same pattern.
+
+- **Inconsistent node-path coupling**: `PlayerBody.cs:46` uses a raw
+  `GetNode<Node3D>("../CameraRig")` relative path while `World3D.cs` uses
+  exported `NodePath` fields for some lookups and hardcoded string
+  `GetNode<T>(...)` for others in the same method. Score: Severity 2 ×
+  Blast radius 2 = **4**. Fix: exported `NodePath` fields consistently.
+
+### Persistence
+
+- **No formal migration runner/version field** — `infra/migrations/*.sql`
+  are numbered files applied once via Postgres `initdb.d`, not replayed
+  against a live DB. The additive `ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+  ... DEFAULT` convention has held so far (used for `owner_world_id` and
+  `warmth`) but there's no tooling enforcing it and no way to apply a new
+  migration to an already-running Postgres without a manual `psql` step. Not
+  scored (no severity yet — no incident), but worth a real migration tool
+  (DbUp, Flyway, or even a tiny hand-rolled `schema_version` table + runner)
+  before this ships with real player data.
+
+### Testing
+
+- **No test coverage at all for `apps/gateway` or `apps/world-server`** — only
+  `sim-core` has a test project. The ownership-claim fix landed tonight
+  (`POST /characters/{id}/claim`) has no automated regression test; it was
+  verified by manual code review only (see `LOG.md` — no dotnet SDK available
+  this session). A future night should add an integration test project that
+  spins up the gateway against a real (or testcontainers) Postgres and
+  exercises the claim/voyage/save endpoints directly, including the
+  concurrent-claim race this fix targets.
+
+## Rejected feature ideas (logged per Phase-2 discipline, not built — audit
+found a fix-tonight-caliber bug first, so Phase 2 wasn't reached)
+
+None yet — Phase 2 (new feature) was skipped tonight because the audit
+surfaced a multiplayer-correctness finding scoring 20 (over the 15 threshold,
+and over the 9 threshold on the multiplayer-correctness track), which the
+routine's decision rule requires fixing instead of building new content.

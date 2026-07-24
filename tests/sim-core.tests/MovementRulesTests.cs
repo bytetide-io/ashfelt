@@ -110,6 +110,62 @@ public class MovementRulesTests
         Assert.Equal(MoveRejection.TooFast, MovementRules.Check(_terrain, start, far, 0.016));
     }
 
+    /// <summary>A stub obstacle field: exactly the cells and edges a test names are solid.</summary>
+    private sealed class StubObstacles : IMovementObstacles
+    {
+        public readonly System.Collections.Generic.HashSet<(int, int)> Cells = new();
+        public readonly System.Collections.Generic.HashSet<(int, int, int, int)> Edges = new();
+        public bool Walkable(int tileX, int tileY) => !Cells.Contains((tileX, tileY));
+        public bool EdgeBlocked(int fx, int fy, int tx, int ty) => Edges.Contains((fx, fy, tx, ty));
+    }
+
+    [Fact]
+    public void MovingIntoAFilledTile_IsBlocked()
+    {
+        var start = OnGround(4.5, 4.5); // tile (4,4)
+        var to = OnGround(5.5, 4.5);    // tile (5,4)
+
+        var obstacles = new StubObstacles();
+        obstacles.Cells.Add((5, 4));
+
+        Assert.Equal(MoveRejection.Blocked, MovementRules.Check(_terrain, start, to, 1.0, obstacles));
+        // The very same move is fine when the tile is clear.
+        Assert.Equal(MoveRejection.None, MovementRules.Check(_terrain, start, to, 1.0, new StubObstacles()));
+    }
+
+    [Fact]
+    public void SteppingAcrossAWalledEdge_IsBlocked()
+    {
+        var start = OnGround(4.5, 4.5); // tile (4,4)
+        var to = OnGround(5.5, 4.5);    // tile (5,4)
+
+        var obstacles = new StubObstacles();
+        obstacles.Edges.Add((4, 4, 5, 4));
+
+        Assert.Equal(MoveRejection.Blocked, MovementRules.Check(_terrain, start, to, 1.0, obstacles));
+    }
+
+    [Fact]
+    public void MovingWithinTheSameTile_IsNeverEdgeBlocked()
+    {
+        var start = OnGround(4.3, 4.3);
+        var to = OnGround(4.6, 4.6); // still tile (4,4)
+
+        var obstacles = new StubObstacles();
+        obstacles.Edges.Add((4, 4, 5, 4)); // an edge exists, but this move does not cross it
+
+        Assert.Equal(MoveRejection.None, MovementRules.Check(_terrain, start, to, 1.0, obstacles));
+    }
+
+    [Fact]
+    public void ObstaclesNeverOverrideAPlainSpeedRejection()
+    {
+        var start = OnGround(4.5, 4.5);
+        var far = OnGround(400.5, 400.5);
+
+        Assert.Equal(MoveRejection.TooFast, MovementRules.Check(_terrain, start, far, 0.05, new StubObstacles()));
+    }
+
     [Fact]
     public void TileOf_MapsMetresBackToTheGrid()
     {

@@ -51,6 +51,36 @@ public class SurvivalRulesTests
     }
 
     [Fact]
+    public void Health_RegeneratesWhenWellFedAndWarm()
+    {
+        var hurt = FromPoints(hunger: MaxPoints, stamina: MaxPoints, health: 50, warmth: MaxPoints);
+        var after = Advance(hurt, TicksPerMinute, warm: true);
+
+        Assert.Equal(50 + HealthRegenPerMinute, after.HealthPoints);
+    }
+
+    [Fact]
+    public void Health_DoesNotRegenerateWhileCold()
+    {
+        // Warmth is high enough that no freezing damage lands, but being cold this
+        // interval still blocks recovery — health holds rather than heals.
+        var hurt = FromPoints(hunger: MaxPoints, stamina: MaxPoints, health: 50, warmth: MaxPoints);
+        var after = Advance(hurt, TicksPerMinute, warm: false);
+
+        Assert.Equal(50, after.HealthPoints);
+    }
+
+    [Fact]
+    public void Health_HoldsButDoesNotHeal_WhenMerelyPeckish()
+    {
+        // Hunger present but below the well-fed line the whole minute: no bleed, no heal.
+        var hurt = FromPoints(hunger: WellFedPoints - 10, stamina: MaxPoints, health: 50, warmth: MaxPoints);
+        var after = Advance(hurt, TicksPerMinute, warm: true);
+
+        Assert.Equal(50, after.HealthPoints);
+    }
+
+    [Fact]
     public void Stamina_RegeneratesWhenNotExertingAndClampsAtFull()
     {
         var drained = FromPoints(hunger: MaxPoints, stamina: 0, health: MaxPoints);

@@ -61,6 +61,17 @@ the `WorldConnection` node for LAN or VPS testing.
 
 WASD/arrows and the mouse work in the editor for desktop testing.
 
+## Contributing
+
+Ashfall is open source and contributions are welcome. Start with
+[**CONTRIBUTING.md**](CONTRIBUTING.md) — it covers the vision and invariants you
+need to respect, the fork → PR workflow, and where to find work to pick up.
+
+- [Development setup](docs/development-setup.md) — build, run, and test locally.
+- [Codebase tour](docs/codebase-tour.md) — what's where and how to change it.
+- [Documentation index](docs/README.md) — the map to every doc.
+- [Code of Conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md)
+
 ## Status
 
 **Phase 0 complete** — monorepo, deterministic terrain generator, UDP
@@ -139,6 +150,44 @@ coherent *and* shades far fewer fragments, so the effect *raises* framerate rath
 than costing it. Flat toon-banded materials complete the look; the HUD renders
 outside the SubViewport so it stays crisp. The Silkscreen/Pixelify fonts live in
 `art/fonts/` and import on first editor open.
+
+**Blueprint building (in progress)** — see `docs/building-blueprints.md`: a
+player designs a structure from modular **pieces** (foundations, walls, doorways,
+windows, pillars, roofs, in wood or stone) and commits it as a private
+**buildground**. The design is a hologram only the owner sees; materials are
+deposited into on-site storage and each piece is **built up strike by strike** in
+support order — and a completed piece becomes public, so others watch the building
+rise out of nothing while the owner sees the whole plan.
+
+- a data-driven **`StructureCatalog`** in `sim-core` (piece kind × material →
+  layer, cost, strikes, support, solid/shelter): adding a buildable piece is one
+  row. Canonical **`PieceSlot`** so the wall shared by two cells is one slot;
+  **`BuildingRules`** for support validation and the bill of materials; a
+  **`BuildSite`** aggregate that stockpiles materials and raises pieces once their
+  supports stand — the whole mechanic is deterministic and unit-tested.
+- the world-server commits, supplies and builds sites, persists them
+  (`blueprint` / `blueprint_piece` / `build_site_storage`), and streams pending
+  pieces only to the owner but built pieces to everyone.
+- the client has an **architect mode**: a translucent cursor ghost, tap-to-place
+  with live validity (illegal ghosts glow red) and a running cost readout, commit,
+  and buildground **deposit/build** actions when standing at an owned site.
+
+A finished building now **matters for survival**:
+
+- **shelter** — standing under a built roof keeps you warm at night, exactly as a
+  lit campfire does (`BuildSite.HasBuiltRoofOver`), and a fiber **thatch roof**
+  gives a first-night shelter before planks exist.
+- **health regenerates** when you are both warm and well-fed
+  (`SurvivalRules` `HealthRegenPerMinute` / `WellFedPoints`) — so food and shelter
+  recover you, not merely delay death.
+- **walls enclose** — obstacles are now solid. `MovementRules` (with
+  `IMovementObstacles`) stops a player at trees, built walls and placed
+  structures, server-authoritative and matched by the client's own colliders, so
+  an enclosed, roofed hut is a real refuge.
+
+Still open: a free-pan **architect camera** (v1 places pieces in front of the
+player), multi-storey building, cooking, rock/water terrain collision, and
+resource/material depth (ore, clay, refining stations).
 
 See `docs/architecture.md` before adding anything; the invariants there
 (server-authoritative, seed+diffs, one shared sim library) are load-bearing.

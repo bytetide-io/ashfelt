@@ -90,6 +90,24 @@ public sealed class Player
     }
 
     /// <summary>
+    /// Removes <paramref name="amount"/> of <paramref name="item"/>. The caller has
+    /// already checked the player holds at least that many — depositing more than
+    /// is held would be a server-side invariant violation, so fail loudly.
+    /// </summary>
+    public void Take(ItemId item, int amount)
+    {
+        if (amount <= 0) return;
+        int remaining = Inventory.GetValueOrDefault(item) - amount;
+        if (remaining < 0)
+            throw new InvalidOperationException(
+                $"Player {Id} spent {amount} {item} they did not hold.");
+
+        if (remaining == 0) Inventory.Remove(item);
+        else Inventory[item] = remaining;
+        InventoryDirty = true;
+    }
+
+    /// <summary>
     /// Drains survival meters by whole ticks using the shared rules.
     /// <paramref name="warm"/> is whether the player is warm this interval —
     /// false when exposed at night, which drains warmth and, once it empties,
@@ -164,12 +182,13 @@ public sealed class Player
     /// Validates a reported position. Returns the rejection reason, or None if
     /// the move was accepted and <see cref="Position"/> updated.
     /// </summary>
-    public MoveRejection TryAccept(TerrainGenerator terrain, Vec3 reported, float yaw, double now)
+    public MoveRejection TryAccept(
+        TerrainGenerator terrain, Vec3 reported, float yaw, double now, IMovementObstacles? obstacles = null)
     {
         // Budget is elapsed time since the last *accepted* position, so
         // spamming updates cannot buy extra distance.
         double delta = now - LastAcceptedAt;
-        var rejection = MovementRules.Check(terrain, Position, reported, delta);
+        var rejection = MovementRules.Check(terrain, Position, reported, delta, obstacles);
 
         if (rejection != MoveRejection.None)
         {

@@ -1,115 +1,143 @@
 # Nightly log
 
-## 2026-07-24 — AUDIT (fix applied)
+Newest entry first. Each entry is the morning report from that night's
+session — see the routine's prompt for the required shape.
 
-**Chose:** Backfill tile diffs (harvested trees/rocks/shrubs) to a joining
-client, the same way placed structures already are. Fixed in
-`a728539b4750bebb63c2f270a9971b52ece3c3f5`.
+---
 
-**Because:** `docs/nightly/{LOG,BACKLOG,ARCH}.md` didn't exist yet, so
-tonight is a first-night audit + honest architecture map (see `ARCH.md`).
-The audit protocol says compute Severity × Blast radius for every finding and
-fix anything ≥15, or any multiplayer-correctness finding ≥9, skipping the
-feature phase. Reading `apps/world-server/Program.cs`'s Hello handler against
-`apps/client/scripts/world3d/World3D.cs`'s `Build()` turned up a real one:
-the server backfills `world.Structures` to a joining player but never
-`world.Diffs`. `World3D.Build()` constructs the whole visible world straight
-from `TerrainGenerator` with no diff awareness — `_tileDiffs` is populated
-only by live `TileChanged` events received *after* the client is already
-connected. So any tile another player (or a previous session) already
-harvested before this client joined stays a full tree/rock/shrub on the new
-client forever: it never collapses, and tapping it silently does nothing,
-because the server's `HarvestRules.Evaluate(world.TileAt(...))` correctly
-sees the diffed (already-bare) tile and refuses. That's core-loop-breaking
-and gets worse the longer a world runs (diffs only accumulate). Severity 4 ×
-blast radius 4 = 16 — clears the mandatory-fix bar on its own, and separately
-clears "multiplayer-correctness ≥ 9." A second finding (missing interest
-management, also scored 9 — see `BACKLOG.md` #1) was real but less urgent and
-had no live symptom today, so per "fix exactly one thing" it was logged
-instead of fixed.
+## 2026-07-24 — AUDIT-ONLY (fix, not feature)
 
-**Changed:** `apps/world-server/Program.cs` only — added a loop over
-`world.Diffs` inside the existing `MessageId.Hello` handler, sending one
-`TileChanged` per diff via the same reliable-ordered channel already used for
-the structure backfill, positioned right before it. No protocol version bump
-(reuses the existing `TileChanged` message; wire layout unchanged). No client
-changes needed at all — the client's existing `OnTileChanged` handler
-(`World3D.cs`) already does exactly the right thing (collapses the matching
-foliage, records the diff) when fed this message; it was only ever missing
-the message.
+**Chose:** Closed a character-duplication hole: the world-server's normal
+(non-voyage) join path loaded a character from the gateway with no ownership
+check, so the same character UUID could be loaded concurrently by two live
+sessions — same world server twice, or two world servers at once — each
+free to independently craft/gather against its own in-memory copy of one
+inventory.
 
-**Risk:** Low, and easy to spot if wrong. The new loop reuses an
-already-proven message type and send pattern (identical in shape to the
-structure backfill three lines below it), so the main way this could go
-wrong is ordering: if `TileChanged` backfill messages ever arrived at the
-client *before* `Welcome` (which drives `Build()`), `World3D.OnTileChanged`
-guards on `!_built` and would silently drop them — the same latent fragility
-the existing structure backfill already depends on (both rely on reliable-
-ordered delivery preserving send order, and on Godot's deferred-call queue
-preserving enqueue order). I did not change that ordering or introduce a new
-instance of it — I placed the diff loop using the identical pattern already
-trusted for structures. Worst case if something's off: a joining client is
-back to today's status quo (stale terrain) for diffed tiles, not a crash or
-a worse desync. Bandwidth cost is one small reliable packet per diff, sent
-once at join, scaling with how many tiles a world has ever had harvested —
-worth revisiting if worlds run long enough to accumulate thousands of diffs
-(noted in `BACKLOG.md` as related to the interest-management gap, not
-re-logged separately).
+**Because:** First-ever run of this nightly routine, so `docs/nightly/`
+didn't exist yet (created this session, `ARCH.md` populated as an honest map
+of the current codebase — see that file). Phase 1 audit ran two parallel
+sub-agent reviews (server/gateway multiplayer-correctness; client
+architecture) plus my own reading of `world-server/Program.cs`,
+`Player.cs`, `gateway/Program.cs`, and the SQL migrations. The ownership gap
+scored **Severity 5 × Blast radius 4 = 20** (agent-verified) — independently
+reproduced by my own read of the same code before the agent reported back.
+That clears both fix-tonight thresholds (≥15 overall, ≥9 multiplayer-
+correctness), so per the routine's decision rule Phase 2 (new feature) was
+skipped entirely. A second finding scored the same 20
+(`world-server` blocks its one packet thread on synchronous gateway HTTP
+calls) but needs a real architecture change, not a one-night fix — logged to
+`BACKLOG.md` instead of attempted alongside this one, per "ship one thing."
 
-**Revert:** `git revert a728539b4750bebb63c2f270a9971b52ece3c3f5` (single
-commit, only touches `apps/world-server/Program.cs`).
+**Changed:**
+- `apps/gateway/Program.cs` — replaced `GET /characters/{id}` (loaded a
+  character with no ownership check at all) with
+  `POST /characters/{id}/claim`, which atomically claims-and-loads in one
+  SQL statement (`INSERT ... ON CONFLICT (id) DO UPDATE ... WHERE
+  owner_world_id IS NULL OR owner_world_id = $requestingWorld`). A claim
+  denied by another world's ownership returns `409 Conflict`; a
+  never-before-seen UUID is created fresh and claimed in the same call. No
+  schema change — `character.owner_world_id` already existed
+  (`infra/migrations/003_voyage.sql`), it just wasn't being enforced on the
+  common (non-voyage) join path.
+- `apps/world-server/GatewayClient.cs` — `GetCharacterAsync` →
+  `ClaimCharacterAsync(id, worldId)`, calling the new endpoint; `null` now
+  means "denied," not "never saved" (a never-saved character now comes back
+  with default state instead of 404/null).
+- `apps/world-server/Program.cs` (`Hello` handler) — two additions: (1) a
+  same-process guard rejecting a second connection presenting a `CharacterId`
+  already held by a live `Player` (closes the same-world-twice case the
+  gateway claim alone can't, since re-claiming by the *same* world id is
+  intentionally allowed for ordinary reconnects); (2) the load step now calls
+  `ClaimCharacterAsync` instead of a plain load, and — this is a real
+  behavior change — a denied or failed claim now disconnects the peer
+  instead of silently letting them join with default state. The old
+  silent-continue-on-load-failure was itself a smaller footgun (a transient
+  gateway blip could reset, then overwrite-on-save, a real character); I
+  judged closing that alongside the main fix as directly in scope rather than
+  scope creep, since it's the same code path and the same "don't proceed
+  without confirmed ownership" principle. Flagging it explicitly in case a
+  human disagrees with bundling it in.
+- `apps/gateway/API.md` — documented the new endpoint, removed the stale GET
+  docs, noted PUT doesn't touch ownership.
+- `docs/nightly/{LOG,BACKLOG,ARCH}.md` — created (didn't exist before
+  tonight).
 
-**Verified:** Read the full diff against the surrounding handler twice;
-confirmed `World.Diffs` (`packages/sim-core/World.cs`) returns
-`KeyValuePair<(int X, int Y), TileType>` so `diff.Key.X`/`.Y`/`diff.Value`
-compile against the same `writer.Put(int)` / `writer.Put(byte)` overloads
-already used two lines below for structures and elsewhere in the same file
-(e.g. `writer.Put((byte)strike.Becomes)` in the chop handler) — no new using
-directives needed, no LINQ. Confirmed by reading `World3D.OnTileChanged` that
-the client-side handling of a `TileChanged` message already does the correct
-thing (collapses foliage via `_foliageByTile`, records `_tileDiffs`) whether
-the message arrives from a live harvest or this new backfill — the fix
-requires zero client changes. Confirmed `world.Diffs` itself is exercised by
-existing sim-core tests (`WorldTests.ReplayingStoredDiffs_ReproducesWorldState`,
-`DiffOverridesGeneratedTerrain_AndAppearsInChunks`), so the data this fix
-reads is already trustworthy.
+**Risk:** This changes the *dev workflow* for manually pointing a client at
+a different world-server without going through the voyage flow (mentioned in
+the root `README.md` as a supported LAN/VPS testing trick): a character
+already owned by `continent-a` will now get a `409` if you connect straight
+to `continent-b` without voyaging, where before it would silently load a
+second copy. That's the invariant working as documented
+(`docs/voyage-transfer.md`: "owned by exactly one world-server at a time"),
+not a regression, but it's a visible behavior change a human should know
+about — to test on a second world, either use a fresh device UUID or run the
+actual voyage flow.
 
-**Not verified:** **I could not build or run anything tonight** — this
-remote sandbox has no `dotnet` SDK installed (`dotnet: command not found`)
-and no network path to install one (the dotnet-install script's host is
-blocked by the outbound proxy allowlist). `dotnet test tests/sim-core.tests`
-was not run, `dotnet build` was not run, and the fix was not exercised
-end-to-end against a live server + two clients. A human needs to, before
-trusting this further: (1) run `dotnet test tests/sim-core.tests` to confirm
-nothing regressed (the change doesn't touch sim-core, so this should be a
-formality, but it wasn't actually run), (2) start a world-server, connect one
-client, harvest a tree, disconnect, reconnect a *second* client and confirm
-the tree is already gone/grass on arrival instead of standing — that's the
-concrete repro this fix targets, (3) confirm the mobile export still builds,
-which was not touched but also wasn't verified.
+Smaller risk: the disconnect-on-claim-failure behavior change above means a
+transient gateway outage now blocks joins outright instead of letting
+players in with reset state. I believe this is strictly better (no silent
+data loss) but call it out since it wasn't explicitly requested.
 
-**Rejected tonight:** Fixing the interest-management gap (`BACKLOG.md` #1)
-in the same session — also scores 9, but has no live symptom today and
-fixing two things violates "ship one complete, correct, reversible change."
-Splitting `World3D.cs`/`SurvivalHud.cs` — real debt (see `ARCH.md`) but
-lower severity than a live core-loop bug, and a structural split is exactly
-the kind of change that's hard to verify without a working build in this
-sandbox tonight. Standing up an integration test for this exact fix — no
-netcode test harness exists yet (`BACKLOG.md` #5); building one properly is
-bigger than tonight's slot, and bolting on a single throwaway test without
-the harness would be worse than being honest that this is unverified.
+**Revert:** `git revert` the commit on this branch that touches
+`apps/gateway/Program.cs`, `apps/gateway/API.md`,
+`apps/world-server/GatewayClient.cs`, and `apps/world-server/Program.cs`.
+No database migration was added or needed, so a code revert alone is
+sufficient and fully reversible.
 
-**Added to backlog:** Interest management declared but unimplemented (9);
-no schema migration path (9); `World3D.cs` god-scene-in-code (6);
-`SurvivalHud.cs` UI god-script (4); zero netcode/integration test coverage
-(9); dead `RequestChunk`/`ChunkData` wire path (1). Full detail in
-`BACKLOG.md`. Also wrote `ARCH.md` as the first honest codebase map, since
-none of the three nightly files existed before tonight.
+**Verified:** Read every touched file end-to-end after editing; balance-
+checked braces/parens programmatically; traced the SQL upsert's
+`ON CONFLICT ... WHERE` semantics by hand against Postgres's documented
+behavior (a false `WHERE` guard skips the update and returns no row — this
+is the exact mechanism the pre-existing `voyage_ticket` upsert in this same
+file already relies on, so the pattern is proven elsewhere in this codebase,
+not novel). Matched the new gateway endpoint's mixed-`IResult`-branch return
+style against the three other endpoints in the same file that already do the
+same thing successfully. Confirmed the JSON property-casing convention
+(`new { worldId }` → binds to a `WorldId` record property) matches the
+existing `RequestVoyageAsync`/`ClaimVoyageAsync` calls in the same file.
 
-**Question for the human:** None blocking — but flagging non-blocking:
-this sandbox has no way to build or run .NET at all, so every future nightly
-session inherits the same "verified by reading, not by running" limitation
-unless the environment gets a `dotnet` SDK (or network access to install
-one). Worth deciding whether that's acceptable for unsupervised nights on a
-codebase this careful, or whether nightly runs should get a pre-provisioned
-SDK.
+**Not verified — a human must check on a real setup:** *Nothing in this repo
+was built, run, or tested tonight.* This session had no working `dotnet`
+SDK (not installed; the network policy denies
+`builds.dotnet.microsoft.com`, which blocked installing one) and no Docker
+daemon (CLI present, socket absent, so `docker compose up` for Postgres
+wasn't possible either). Concretely, a human needs to:
+1. `dotnet build` the whole solution — I have not confirmed this compiles.
+2. `dotnet test tests/sim-core.tests` — untouched by this change, should
+   still pass, but not actually run.
+3. Bring up `infra/docker/docker-compose.yml`'s Postgres, run the gateway
+   and two world-server instances, and manually reproduce the exact race
+   this fix targets: connect two clients with the same device UUID (same
+   world, then different worlds) and confirm the second is rejected with a
+   log line, not a second live session.
+4. Confirm a legitimate voyage (A → B) still works end-to-end: the ticket
+   claim sets ownership, and the immediately-following character claim in
+   the `Hello` handler is a same-world no-op that succeeds.
+5. Confirm the client build still launches for the mobile target — untouched
+   by tonight's change (client code wasn't modified at all), but I can't
+   personally confirm that from this session.
+
+**Rejected tonight:** Didn't attempt the also-20-scoring blocking-HTTP-call
+finding in the same session — bundling two structural server changes in one
+unreviewed night, with no way to build or test either, is exactly the
+"five speculative changes instead of one complete one" this routine warns
+against. Didn't touch the `World3D.UpdateGatherPrompt` mobile-perf finding
+(score 12, under the fix-tonight threshold and not multiplayer-correctness).
+Didn't start on Phase 2 (new feature) at all — the decision rule says skip
+it entirely when a fix-tonight finding exists, and one did.
+
+**Added to backlog:** See `docs/nightly/BACKLOG.md` for the full scored
+list — blocking-gateway-calls (20), gather-prompt perf (12), SurvivalHud/
+World3D god-scripts (9 each), WorldConnection dispatch switch (9), foliage
+triplication (6), node-path coupling (4), plus unscored notes on the missing
+migration runner and the total absence of gateway/world-server test
+coverage.
+
+**Question for the human:** None blocking — the fix is self-contained and
+reversible with a single revert, and the one real workflow change (manual
+cross-world testing needs a real voyage or a fresh UUID now) is documented
+above rather than something I need a decision on. The one thing worth your
+attention regardless: please run the build/test/manual-race verification
+listed above before this reaches anything with real player data, since none
+of it happened automatically tonight.

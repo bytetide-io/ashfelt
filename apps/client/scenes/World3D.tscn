@@ -7,6 +7,7 @@
 [ext_resource type="Script" path="res://scripts/WorldConnection.cs" id="5_conn"]
 [ext_resource type="Script" path="res://scripts/world3d/RemotePlayers.cs" id="6_remotes"]
 [ext_resource type="Script" path="res://scripts/world3d/SurvivalHud.cs" id="7_hud"]
+[ext_resource type="Script" path="res://scripts/world3d/CharacterRig.cs" id="8_rig"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_1"]
 sky_horizon_color = Color(0.65, 0.72, 0.78, 1)
@@ -35,10 +36,6 @@ roughness = 0.15
 size = Vector2(600, 600)
 
 [sub_resource type="CapsuleShape3D" id="Capsule_1"]
-radius = 0.4
-height = 1.8
-
-[sub_resource type="CapsuleMesh" id="CapsuleMesh_1"]
 radius = 0.4
 height = 1.8
 
@@ -81,9 +78,7 @@ script = ExtResource("2_player")
 shape = SubResource("Capsule_1")
 
 [node name="Visual" type="Node3D" parent="WorldView/Viewport/World3D/Player"]
-
-[node name="Body" type="MeshInstance3D" parent="WorldView/Viewport/World3D/Player/Visual"]
-mesh = SubResource("CapsuleMesh_1")
+script = ExtResource("8_rig")
 
 [node name="CameraRig" type="Node3D" parent="WorldView/Viewport/World3D"]
 script = ExtResource("3_camera")
