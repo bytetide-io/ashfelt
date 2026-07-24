@@ -132,6 +132,27 @@ compatibility contract — changing generation changes every existing world.
   `TileAt` output but no world has shipped, and the determinism tests assert
   consistency and variety, not fixed values.
 
+## Authored content is part of the seed (decision on record)
+
+The roadmap (`gameplay-roadmap.md` §2.2) moves toward an **authored, pre-built
+world** — real cities, houses and ruins — that keeps extending toward real-world
+scale. This is recorded here because it touches invariant #2 and the "bounded
+worlds, not one seamless map" vision, and it does **not** break either:
+
+- **Authored places are deterministic input to generation, not persisted
+  chunks.** A city/house/ruin is a compiled `PrefabDef` stamped by the generator
+  at a deterministic anchor. The prefab atlas is, in effect, part of the seed:
+  the same anchor produces the same place on every device, so full chunks are
+  still never persisted — only the procedural seed + prefab atlas + sparse player
+  diffs. Invariant #2 holds.
+- **The world still is not one seamless map.** "Real-world size" is reached by
+  authoring and standing up **more bounded regions/world-servers over time**,
+  linked by voyages — the shape the architecture already has. There is no global
+  seamless map, and there will not be one.
+- **Editing an authored place is an ordinary diff**, so a looted or raided
+  structure persists like any other player change. See `voxel-terrain.md`
+  §"Relationship to the authored world" for the cube-level mechanics.
+
 ## Target frameworks
 
 - `sim-core`, `shared-proto`, `client` → **net8.0** (Godot 4's runtime).

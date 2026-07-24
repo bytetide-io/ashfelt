@@ -1,7 +1,12 @@
 # Ashfall
 
-Open-source, mobile-only 2D pixel top-down survival game. Godot 4 client,
-C# authoritative world-servers, many bounded worlds linked by ocean voyages.
+Open-source, mobile-only 3D low-resolution pixel-art survival game (third-person,
+"roblox-kind" look, optimized for mobile). Godot 4 client, C# authoritative
+world-servers, many bounded worlds linked by ocean voyages.
+
+The long-horizon plan — from today's survival loop to countless materials, gear
+and firearms, an authored world of cities to loot, clans, karma-governed PvP and
+vehicles — lives in [`docs/gameplay-roadmap.md`](docs/gameplay-roadmap.md).
 
 ## Layout
 
@@ -139,6 +144,12 @@ coherent *and* shades far fewer fragments, so the effect *raises* framerate rath
 than costing it. Flat toon-banded materials complete the look; the HUD renders
 outside the SubViewport so it stays crisp. The Silkscreen/Pixelify fonts live in
 `art/fonts/` and import on first editor open.
+
+**Next — the endgame roadmap.** The near-term survival phases (skills & digging,
+creatures & melee, polish) and the full vision beyond them (materials & crafting
+stations, gear & the underground shelter, the authored world of cities and ruins,
+cooking, firearms, clans & bases, karma & raiding, vehicles) are laid out as a
+dependency-ordered phase ladder in `docs/gameplay-roadmap.md`.
 
 See `docs/architecture.md` before adding anything; the invariants there
 (server-authoritative, seed+diffs, one shared sim library) are load-bearing.
