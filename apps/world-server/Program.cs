@@ -186,6 +186,21 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             peer.Send(writer, DeliveryMethod.ReliableOrdered);
             player.InventoryDirty = true;
 
+            // Backfill every tile diff already recorded — trees felled, rocks
+            // broken, shrubs stripped — before this player connected. Without this
+            // a joining client renders those nodes as pristine forever: the server
+            // holds the diffed tile and silently refuses to re-harvest it, so the
+            // node just never falls no matter how many times it's tapped.
+            foreach (var diff in world.Diffs)
+            {
+                writer.Reset();
+                writer.Put((byte)MessageId.TileChanged);
+                writer.Put(diff.Key.X);
+                writer.Put(diff.Key.Y);
+                writer.Put((byte)diff.Value);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+            }
+
             // Backfill the already-built world so a joining player sees every
             // structure, not just the ones placed after they arrived.
             foreach (var structure in world.Structures)
