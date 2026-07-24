@@ -104,7 +104,21 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
             var uuidBytes = new byte[16];
             reader.GetBytes(uuidBytes, 16);
-            player.CharacterId = new Guid(uuidBytes);
+            var characterId = new Guid(uuidBytes);
+
+            // A second live connection presenting the same character UUID — same
+            // world twice, most simply a double-connect during a flaky reconnect —
+            // would otherwise load a second, independent in-memory copy of one
+            // inventory: two Player objects, each free to spend the same starting
+            // items. Reject outright rather than risk two sessions mutating one
+            // character.
+            if (players.Values.Any(p => p != player && p.CharacterId == characterId))
+            {
+                Console.WriteLine($"[world] rejecting duplicate connection for character {characterId}");
+                peer.Disconnect();
+                break;
+            }
+            player.CharacterId = characterId;
 
             string ticketText = reader.GetString();
 
@@ -112,7 +126,7 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // before it may load the character. A failed claim (expired, forged,
             // already used) means the character is not ours to load — reject the
             // join rather than risk two worlds owning one character. A normal join
-            // has an empty ticket and loads as before.
+            // has an empty ticket and claims below instead.
             if (ticketText.Length > 0)
             {
                 bool claimed = Guid.TryParse(ticketText, out var ticket)
@@ -132,17 +146,33 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // wait, and seeding synchronously keeps the inventory the tick loop
             // reads free of cross-thread mutation. Saves, by contrast, are
             // fire-and-forget so a leaving player never stalls the others.
+            //
+            // Claiming (not a plain load) is what makes this world the character's
+            // sole owner for the session: a voyage arrival is already owned by us
+            // from the ticket claim above and this call is then a same-world
+            // no-op; a normal join claims for the first time. Either way, a
+            // denied or failed claim must not let the player in — proceeding with
+            // default state on a transient gateway error would silently reset (and
+            // then overwrite-on-save) whatever the gateway actually holds.
+            CharacterState? character;
             try
             {
-                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
-                if (character is not null) player.LoadCharacter(character);
-                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
-                                  (character is null ? "is new" : "loaded"));
+                character = gateway.ClaimCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[world] character load failed for {player.CharacterId}: {ex.Message}");
+                Console.Error.WriteLine($"[world] character claim failed for {player.CharacterId}: {ex.Message}");
+                peer.Disconnect();
+                break;
             }
+            if (character is null)
+            {
+                Console.WriteLine($"[world] rejecting join for {player.CharacterId}: owned by another world");
+                peer.Disconnect();
+                break;
+            }
+            player.LoadCharacter(character);
+            Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} claimed");
 
             writer.Reset();
             writer.Put((byte)MessageId.Welcome);
