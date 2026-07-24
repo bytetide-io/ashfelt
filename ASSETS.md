@@ -41,6 +41,26 @@ path intact.
 | `boulder.png` | 32x48 | Rock outcrop |
 | `player.png` | 16x24 | Placeholder character |
 
+## Character body
+
+The visible character is **procedural, not a file**: `scripts/world3d/CharacterRig.cs`
+builds a placeholder humanoid from primitives and animates it in code (a gait tied
+to ground speed, a two-handed harvest swing). One rig is shared by the local
+player and every remote puppet, so animation logic is never duplicated.
+
+Replacing it with real art is a drop-in, no caller changes: import a **CC0 rigged
+character** as glTF `.glb`, swap `CharacterRig.BuildBody` for the model instance,
+and route the two existing entry points — `SetLocomotion(speed, grounded)` and
+`PlayGather()` — into an `AnimationTree` (idle↔walk↔run on a 1-D speed blend,
+gather as a `OneShot`). The **API is the contract**, exactly as the tile atlas
+layout is the contract for terrain.
+
+Sources that fit both the licence rules below and the low-resolution render:
+[Quaternius' Universal Animation Library](https://quaternius.com) (one skeleton,
+a large CC0 animation set incl. gather/mine actions) or
+[Kenney's Animated Characters](https://kenney.nl). Avoid **Mixamo** — its rig and
+clips are convenient but not CC0, so they don't fit an open-source repo.
+
 ## Replacing with real art
 
 The tile layout is the contract, not the pixels: keep one row per `TileType` in

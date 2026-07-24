@@ -71,6 +71,25 @@ against the SubViewport's camera as expected. A tap gathers the reticled node �
 the nearest harvestable tile in reach, resolved each physics frame — rather than
 raycasting the tapped pixel, so hitting a tree never demands pixel-accurate aim.
 
+### Character body: one rig, fed intent
+
+**Decided.** The visible body is a single shared component, `World3D/CharacterRig.cs`,
+worn by both the local player and every remote puppet — animation is written once,
+not re-derived on each side. Drivers feed it *intent*, never poses: a movement
+driver reports planar speed and grounded state (`SetLocomotion`), and a harvest
+sends one strike (`PlayGather`). Locomotion cadence is tied to ground speed, so a
+walk and a run animate from the same call with no gait state to select, and a
+remote body's gait is inferred from how fast its eased position actually moves —
+the snapshot carries no velocity and needs none.
+
+This is a **client-visual layer only**: it reads movement the server already
+validates and never feeds back into simulation, so it is exempt from the
+determinism contract (platform floats and per-frame timing are fine here, unlike
+in `sim-core`). The current body is a procedural primitive placeholder; a CC0
+rigged glTF drops into the same two-method API without touching a caller — the
+drop-in contract is in `ASSETS.md`. Remote harvest swings wait on the protocol
+carrying a per-player action; today only the acting player sees the strike.
+
 ### Movement authority: the client simulates, the server validates
 
 **Decided.** The client runs physics and reports where it ended up. The server
