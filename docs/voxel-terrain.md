@@ -177,6 +177,26 @@ world looks like** — this is a generation change on record, acceptable pre-alp
 because no world has shipped. Add the entry to `architecture.md` §Determinism when
 the first slice lands, same as the Shrub/BerryBush notes.
 
+## Relationship to the authored world
+
+`gameplay-roadmap.md` §2.2/§3.3 introduces an **authored, pre-built world** —
+real cities, houses and ruins — extending toward real-world scale. That does not
+compete with this model; it layers on top of it and keeps every invariant:
+
+- **Prefabs are seed-side, cubes are the substrate.** An authored place is a
+  bounded volume of cubes (+ structures + loot anchors) stamped by the generator
+  at a deterministic anchor, *after* `MaterialAt` fills the column and *before*
+  diffs. The prefab atlas is part of "the seed" (invariant #2): the same anchor
+  yields the same city on every device, and no authored cube is persisted whole.
+- **Editing an authored place is an ordinary diff.** Digging out a looted house
+  wall or mining a city's stone writes the same `cube_diff`/`tile_diff` entries as
+  editing wild terrain — so a raided ruin stays raided and a stripped vein stays
+  stripped, with no special-casing.
+
+The digging model is therefore the *foundation* for the authored world, not a
+detour from it. Build columns + dig diffs first (roadmap Phase B); the prefab
+stamp pass (roadmap Phase G) rides the same cube substrate and diff path.
+
 ## Not doing (yet)
 
 - True 3D sparse voxels (caves, overhangs, roofed tunnels).

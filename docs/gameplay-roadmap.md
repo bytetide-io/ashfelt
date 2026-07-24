@@ -1,218 +1,357 @@
 # Ashfall — gameplay & foundation roadmap
 
-Evaluation of the current build plus a phased plan for engaging gameplay and the
-reusable systems that make future content cheap to add. Companion to
-`architecture.md` (which owns the invariants); this doc owns *what to build and
-why*.
+The path from the current build to the full game: a mobile survival world of
+countless materials, crafted gear and weapons, living creatures, authored cities
+to loot, clans with shared bases, karma-governed PvP, vehicles, and a world that
+keeps growing toward real-world scale.
 
-## 1. Where the game stands
+Companion to `architecture.md` (which owns the invariants) and `voxel-terrain.md`
+(which owns the cube/digging model). This doc owns **what to build, why, and in
+what order.** Read the vision and invariants in `CLAUDE.md` and `architecture.md`
+first — nothing here is allowed to break them without a recorded decision.
 
-The **plumbing is excellent and the game is thin.** The hard, load-bearing
-problems are already solved well:
+The organising principle has not changed: **spend each unit of effort making
+survival a loop the player can win and want to repeat, and build the data-driven
+foundations that make every subsequent mechanic a few rows of data instead of a
+cross-cutting code change.** "Unlimited possibilities" is not a slogan here — it
+is a direct consequence of getting four foundations right (content registry,
+item instances, authored-content stamps, and the entity system) so that a new
+gun, animal, ore, building or garment is *content*, never new engine code.
+
+---
+
+## 1. Where the game stands (2026-07)
+
+The **plumbing is excellent and the game is thin, but thickening.** The
+load-bearing problems are solved well:
 
 - Server-authoritative loop, client prediction + reconciliation, deterministic
   `sim-core` shared across the boundary.
 - Seed + diffs world storage; structures persisted and backfilled on join.
 - Gateway-owned characters that survive reconnect; voyage handoff with
   single-ownership tickets.
-- A clean survival-meter model that is integer-deterministic and predictable.
+- A data-driven **item catalog** (`ItemCatalog`): one `ItemDef` table is the
+  single source of item behaviour, and `HarvestRules`/`PlacementRules` are
+  lookups over it, not switches — adding content is adding data.
+- The **core survival loop closes**: forage berries → eat (`EatRequest` →
+  `SurvivalRules.Eat`); night drains a **warmth** meter unless you shelter by a
+  lit campfire; a matching **tool** speeds and enriches harvest; nodes have
+  durability and visibly wear down.
+- Presentation has moved to **3D, low-resolution pixel-art** (surface-texel
+  materials + a low-res `SubViewport` upscale) with the Ashfall design system and
+  runtime-generated pixel icons. (Note: `CLAUDE.md`/`README` still say "2D" in
+  places — that is stale; the client is 3D and stays 3D. See §2.3.)
 
-What is missing is **the game loop that makes those systems matter.** Today the
-entire player experience is:
+What is still true: today's *content* is small. A handful of tiles, ten items,
+six recipes, no creatures, no authored places, no gear depth, no social layer.
+The rest of this document is the ladder from here to the full vision — and,
+crucially, the foundations that make climbing it cheap.
 
-> tap a tree/rock/shrub → get wood/stone/fiber → craft one of 6 things → place a
-> wall or campfire → watch hunger drain to zero and die with nothing you can do
-> about it.
+---
 
-### The engagement-critical holes
+## 2. The endgame vision — and the three tensions it creates
 
-1. **No food loop.** Hunger drains and `SurvivalRules.Eat` exists, but *nothing
-   in the game produces food or calls Eat*. The core survival tension has no
-   resolution — the only outcome is starvation. This is the single most
-   important gap.
-2. **Tools are dead content.** `Axe` and `Pickaxe` are craftable but confer no
-   benefit; `HarvestRules.Evaluate` neither requires nor rewards them. Crafting
-   them is a pure resource sink with no payoff.
-3. **Structures are inert.** A placed `Campfire` or `Wall` is scenery. No
-   warmth, no light, no cooking, no crafting-station gating, no collision on
-   walls. Building has no consequence.
-4. **Day/night has no stakes.** The sun moves; nothing else changes. Night
-   should be *the* pressure that gives the campfire and walls a reason to exist.
-5. **No goals or progression.** No skills (despite the pitch), no unlocks, no
-   reason to return to a session. Nothing to be *getting better at*.
-6. **Harvest lacks depth.** ~~One tap, one resource, instant.~~ Nodes now have
-   durability: a shrub or berry bush forages in one tap, a tree takes four
-   strikes and a rock five, and a matching tool shaves a strike per tier
-   (`HarvestNodeDef.Hits`, `HarvestRules.HitsToFell`). Partial progress is
-   transient server state broadcast as `HarvestProgress` so the node visibly
-   wears down; only the felling strike writes a diff. **Remaining:** yield
-   variance, and node/tool *tiers* beyond the first.
+The target (from the project owner):
 
-None of these need architecture changes — they need content and a few new
-shared rules. But adding them naively means more hardcoded `switch` statements,
-and that's the second half of this plan.
+> Countless materials for construction, tools and weapons · animals & cooking
+> ingredients · crafting stations (cooking stove, gunpowder lab, gun workbench) ·
+> backpacks and clothing with capabilities · an authored, pre-built world that
+> keeps extending toward real-world size · real cities/houses/abandoned
+> constructions to loot for resources and gear · clans that team up and build a
+> shared base · karma that discourages slaughtering the weak, with real effects ·
+> better (still low-res, "roblox-kind") graphics · players spawn from a personal
+> underground shelter that is their first safe store · the ability to grief/tear
+> down buildings · a wide range of guns · cars and boats.
 
-## 2. Gameplay plan — build the survival loop, then deepen it
+Three parts of this conflict with the written vision. Per `CLAUDE.md` we resolve
+each explicitly rather than drift.
 
-Design filter (from `CLAUDE.md`): every feature must make *surviving more
-interesting*. Ordered so each phase is independently shippable and the earliest
-work closes the biggest engagement gap.
+### 2.1 Guns vs. "not a shooter"
 
-### Phase A — Close the core loop (make survival winnable)
+`CLAUDE.md`: *"Survival first. Not a shooter, not an MMO theme park."* Guns,
+gunpowder labs and gun workbenches are in the endgoal. **Resolution: guns are a
+scarce, late, expensive survival capability, not the core loop.** They sit at the
+top of a long tech tree (ore → metalworking → machining → gunpowder chemistry →
+a gun workbench), fire ammunition that must itself be crafted and is always
+scarce, and degrade. The moment-to-moment game is still gather/craft/build/endure;
+a firearm is a hard-won tool for defending a base or a voyage, and **karma (§ Phase
+K) is the systemic counterweight** that keeps the world from becoming a deathmatch.
+This keeps "survival first" honest while delivering the arsenal.
 
-The goal: a player can perceive a threat, act against it, and succeed. This is
-the minimum that turns the demo into a game.
+### 2.2 A pre-built world "the size of the real world" vs. seed + diffs and bounded worlds
 
-> **Progress.** Food & eating ✅ (BerryBush → Berry → EatRequest), functional
-> campfire as a warmth source ✅, night pressure ✅ (a warmth meter that drains
-> when exposed after dark and bleeds health at zero), and tools boosting harvest
-> ✅ (a tool matching a node's `PreferredTool` adds its tier to the per-strike
-> yield *and* shaves a strike off felling it; bare hands still work so tools stay
-> bootstrappable). **Remaining:** the campfire as
-> a *cooking* station (needs a raw→cooked food pair) — a natural bridge into
-> Phase B/C, since raw meat arrives with creatures.
+`architecture.md` invariant #2 (world = seed + diffs, full chunks never
+persisted) and the vision (*"bounded worlds, not one seamless map"*). The endgoal
+wants an authored world with real cities that keeps extending to real-world scale.
+**Resolution — authored content becomes deterministic *input* to generation, not
+persisted chunks:**
 
-- **Food & eating.** Add gatherable food (berries from a new `Berry`/bush node,
-  and cooking raw → cooked at a campfire). Wire `SurvivalRules.Eat` to an
-  `EatRequest`. Food value is a per-item data field (see §3.1), not a switch.
-- **Functional campfire.** Placing/lighting a campfire creates a warmth + light
-  aura and acts as a **cooking station**. This is what makes night survivable
-  and gives building a point.
-- **Night as pressure.** At night, add a cold/exposure drain unless near a
-  warmth source (campfire). Day/night now drives behaviour: gather by day,
-  hunker by night. Reuses the existing `WorldClock` broadcast.
-- **Tools matter.** Gate/accelerate harvest by held tool: bare hands are slow or
-  yield less; an axe makes forests fast, a pickaxe makes rock viable. Encode as
-  data on the harvest rule (tool → yield/speed multiplier), not new branches.
+- A city, house or ruin is a **prefab**: authored, versioned, content-addressed
+  data compiled into `sim-core`. The generator *stamps* prefabs onto the terrain
+  at authored anchor points. The prefab atlas is, in effect, **part of the seed** —
+  the same anchors produce the same city on every device, so the invariant holds:
+  we still persist only the seed (now: procedural seed + prefab atlas) plus sparse
+  player diffs. No authored chunk is ever stored per-world; it is re-derived.
+- "Real-world size" is reached by **adding bounded regions/world-servers over
+  time**, linked by voyages — never by one seamless global map. The world grows by
+  authoring and standing up new regions, exactly the shape the architecture
+  already has. `docs/architecture.md` records this decision (see the note added
+  there); `voxel-terrain.md` gains a short "authored world" reconciliation.
 
-Exit criteria: a new player can survive their first night by gathering food,
-building a fire, and cooking — and *feel* why each step mattered.
+### 2.3 "2D pixel top-down" vs. the 3D client
+
+`CLAUDE.md`/`README` still describe a *"2D pixel top-down"* game; the client
+pivoted to third-person **3D** (see `architecture.md` §Projection). The endgoal's
+*"better graphics, still low resolution, roblox-kind, highly optimized"* confirms
+3D low-res pixel-art as the direction. **Resolution: 3D is the projection; the
+stale "2D" language is corrected in `CLAUDE.md`/`README`.** The optimization
+mandate (low-res render, surface texels, interest management, mobile budget) is
+non-negotiable and shapes every art and content decision below.
+
+---
+
+## 3. Foundations — the four things that make "unlimited" cheap
+
+Build/extend these *ahead of* the content phases that need them. Every content
+phase below is expressed as data over one of these.
+
+### 3.1 The content registry, scaled up (extends today's `ItemCatalog`)
+
+`ItemCatalog` already proves the model: one declarative `ItemDef` table, rules as
+lookups. Scale it to carry every content type the vision needs, all in `sim-core`
+so client and server read identical facts (invariant #4), all covered by the
+"every id has a def" test discipline:
+
+- `ItemDef` grows fields as phases need them (equip slot, insulation, carry
+  bonus, weapon stats, ammo type, decay rate) — **additive, never a new switch.**
+- `HarvestNodeDef`, `RecipeDef` (with a **required crafting station** and unlock
+  condition), `StructureDef` (footprint, solid?, station?, warmth/light, HP),
+  `CubeMaterialDef` (from `voxel-terrain.md`: dig tool/tier, drop, placeable).
+- New: `CreatureDef`, `LootTableDef`, `PrefabDef`, `VehicleDef` (each introduced
+  by its phase). Determinism rules apply to all: static, ordered, integer-valued.
+
+"Countless materials" is this table getting long. That must stay *cheap and safe*
+— hence the test that every referenced id resolves and every recipe's inputs and
+node's outputs are real.
+
+### 3.2 An item-*instance* model (new; unblocks gear, weapons, decay)
+
+Today inventory is `ItemId → count`: fine for fungible resources, wrong for a
+worn axe, a scoped rifle, or a backpack with contents. Introduce an **item
+instance**: a stable instance id, its `ItemId`, and per-instance state
+(durability, quality tier, attachments, container contents). Stacks stay counts;
+anything with individuality becomes an instance. Lives on the **gateway
+character** (invariant #3), wire-encoded once in `shared-proto`. This is the
+single prerequisite for clothing, backpacks, guns with attachments, and gear
+degradation — all of Phases F and I ride it.
+
+### 3.3 The authored-content / prefab system (new; unblocks the world)
+
+Per §2.2: a `PrefabDef` format (a bounded volume of cubes + structures + loot
+anchors), an authoring pipeline (source format → compiled deterministic data), and
+a **generator stamp pass** that places prefabs at deterministic anchors after
+terrain and before diffs. Riding invariant #2: prefabs are seed-side, player
+changes to them are ordinary diffs, so a looted house restocks predictably and a
+raided one stays raided. Enables Phase G (cities/ruins) and, later, clan-authored
+blueprints.
+
+### 3.4 The server-side entity/actor system (already scoped in the old roadmap)
+
+Creatures, dropped items, vehicles and future NPCs don't fit tiles-or-structures.
+An authoritative **entity** abstraction (id, position, kind, per-tick behaviour)
+broadcast through the **existing interest-management path** (invariant #5 — extend,
+don't fork), with behaviour rules kept deterministic in `sim-core`. Players become
+one entity kind; dropped loot, animals, and vehicles are others. Unblocks Phases
+H (creatures/cooking), I (projectiles), and L (vehicles).
+
+### 3.5 Protocol & client-decomposition hygiene (carried from the old roadmap)
+
+- `shared-proto` read/write helpers so a new message is a method, not a wire
+  scavenger hunt — every phase below adds messages.
+- Split `World3D.cs`/`SurvivalHud.cs` into systems; a `MessageId`-keyed dispatch
+  table; a reusable touch-UI widget kit (meter, item-slot, action button) and one
+  client-side inventory model the HUD/craft/build/gear panels all observe.
+- One `Tuning` config for all balance numbers.
+
+---
+
+## 4. The phase ladder
+
+Phases A–D are the near-term survival loop (A largely done). E onward is the
+endgame vision. Phases are ordered by dependency, **not strictly serial** — art,
+balancing and onboarding run continuously, and several content phases parallelise
+once their foundation exists. Each phase names the foundation it rides and its
+exit criterion.
+
+### Phase A — Close the core loop ✅ (largely complete)
+
+Food & eating, functional campfire (warmth + cooking station), night pressure,
+tools that matter, harvest durability. **Remaining:** campfire as a true *cooking*
+station (raw→cooked pair) — folded into Phase H where raw meat arrives.
+*Exit: a new player survives their first night and feels why each step mattered.*
 
 ### Phase B — Depth & progression (make it worth returning)
 
-- **Skills / proficiency.** Gathering and crafting raise a proficiency stored on
-  the gateway character (invariant #3). Higher proficiency → better yield, new
-  recipes. Gives a reason to keep playing and a natural difficulty curve.
-- **Health regen & injury.** Health currently only *falls* (starvation). Add
-  regen when well-fed and rested so combat/hazards later have counterplay.
-- **More recipes & tiers.** Tool tiers (stone → metal), storage containers,
-  better shelter pieces, a bed/respawn point. All data-driven.
-- **Wall collision & real shelter.** Walls become solid in the shared movement
-  rules so an enclosure actually keeps things out — prerequisite for threats.
+- **Skills/proficiency** on the gateway character (invariant #3): gathering and
+  crafting raise proficiency → better yield, new recipes, a difficulty curve.
+- **Health regen & injury** so later combat/hazards have counterplay.
+- **Wall collision & real shelter** in the shared movement rules — prerequisite
+  for threats and for bases.
+- **Digging & ore** (implements `voxel-terrain.md`): the cube/column model, dig
+  diffs, `DigRules`, ore tiers. This is where **tools finally gate depth** and
+  "countless materials" starts — the first ores enter the registry.
+*Exit: there is something to get better at, walls keep things out, and digging
+down reveals materials.*
 
-### Phase C — Living world (make it tense)
+### Phase C — Living world v1 (make it tense)  ·  rides §3.4 entity system
 
-- **Creatures/entities.** A server-side entity system (see §3.3) for passive
-  animals (huntable food + hide) and night hostiles (the reason for walls).
-  This is the first thing needing an actor abstraction beyond tiles/structures.
-- **Simple combat.** Melee against creatures, server-authoritative, reusing the
-  reach check that already gates harvesting.
-- **Hazards & biomes with identity.** Biomes offer different resources/threats,
-  giving voyages between worlds a *reason* (invariant: bounded worlds, linked by
-  ocean).
+- **Creatures**: passive animals (huntable food + hide) and first night hostiles
+  (the reason walls exist). First real use of the entity system.
+- **Simple melee combat**, server-authoritative, reusing the reach check that
+  already gates harvesting.
+- **Dropped items as entities** (design the harvest-loot case now so loot can be
+  a world entity, not a teleport-to-inventory).
+*Exit: the night has teeth and animals are a reason to leave the fire.*
 
-### Phase D — Polish & onboarding (make it intuitive)
+### Phase D — Polish & onboarding (make it intuitive) · continuous
 
-- **Onboarding / first-session guidance.** Contextual prompts ("you're cold —
-  build a fire"), not a wall of tutorial. Mobile players won't read.
-- **Item icons & feedback.** Icon package for inventory/craft/build (per global
-  guideline: no hand-rolled SVG). Harvest/craft/eat feedback (particles, sfx,
-  numbers). Legibility on a small screen.
-- **UI pass.** One-thumb reachable, short-session friendly. Consolidate the HUD.
-- **Audio & balancing.** Tune drain rates, yields, night length against real
-  play.
+Contextual first-session guidance (mobile players won't read walls of text), item
+icons & feedback (particles/sfx/numbers), one-thumb HUD consolidation, audio, and
+balancing against real play. Runs alongside every phase, not just once.
 
-## 3. Foundation — reusable systems that make the above cheap
+---
 
-The current content is small enough that hardcoding was right. But every Phase-A
-feature above wants to add *items, nodes, recipes, structures, effects*. If each
-addition means editing a `switch` in `HarvestRules`, an array in
-`CraftingRules`, an enum in `Protocol`, a branch in `World3D.cs`, and a HUD
-tweak, velocity collapses. Build these four foundations **first, alongside Phase
-A**, and content becomes data.
+Everything below is the endgame vision. Foundations §3.1–3.4 are the gate; build
+each foundation immediately before the first phase that needs it.
 
-### 3.1 A data-driven content registry in `sim-core` (highest leverage)
+### Phase E — Materials, stations & the tech tree  ·  rides §3.1 registry
 
-Today item behaviour is scattered: harvest yields in one switch, recipes in an
-array, food value nowhere, tool bonuses nowhere. Consolidate into **one
-declarative definition table per content type**, all in `sim-core` so client and
-server read identical data (invariant #4):
+The backbone that makes "countless materials & crafting stations" tractable.
 
-- `ItemDef` — display name, stack size, category, **food value**, **tool class &
-  tier**, icon id. Keyed by the existing wire-stable `ItemId`.
-- `HarvestNodeDef` — what a node yields, what it becomes, required/preferred
-  tool, base yield & variance, harvest time.
-- `RecipeDef` — already close (`CraftingRules.Recipes`); extend with a required
-  **crafting station** and unlock condition, keep the ordered-list determinism.
-- `StructureDef` — footprint, solid?, provides-warmth?, is-station?, light
-  radius.
+- **Material tiers & processing chains.** Ore → smelted metal → parts; plant →
+  fiber → cloth; the chains that later feed tools, gear and guns. Each link is an
+  `ItemDef` + `RecipeDef` row.
+- **Crafting stations as gated structures.** Extend `StructureDef`/`RecipeDef` so
+  a recipe can require a station: **campfire → cooking stove → gunpowder lab → gun
+  workbench**, plus workbench/forge/tanning rack. Placing and using a station is
+  the existing placement + a recipe-station check — no new subsystem.
+- **Storage containers** as structures with instance-backed contents (§3.2).
+*Exit: a legible progression of stations unlocks tiers of materials and recipes,
+all data-driven.*
 
-Rule functions (`HarvestRules.Evaluate`, `CraftingRules.Evaluate`) become thin
-lookups over these tables instead of switches. **Adding a new gatherable food
-then means one `ItemDef` + one `HarvestNodeDef` row — no server, protocol, or
-client code change.** Keep the determinism contract: tables are static, ordered,
-integer-valued, and covered by a test asserting every `ItemId` has a def.
+### Phase F — Gear: backpacks, clothing & the underground shelter  ·  rides §3.2 instances
 
-### 3.2 A typed protocol serialization helper in `shared-proto`
+- **Equipment slots & clothing** with capabilities: insulation (feeds the warmth
+  meter), protection, carry modifiers, environment resistance — all `ItemDef`
+  fields, all per-instance state.
+- **Backpacks** expand carry capacity; a backpack is a container instance.
+- **The underground shelter.** Every player spawns from a **personal underground
+  shelter** — their first safe place and overflow store before they build a base.
+  Modeled as an owned, access-controlled space with storage and the spawn/respawn
+  anchor. Implemented via §3.2 (storage), §3.3 (a prefab per player), and the
+  gateway (ownership + spawn point).
+*Exit: what you wear and carry matters, and every player has a safe home to
+return to and stash beyond their backpack.*
 
-`Program.cs` and the client hand-write `writer.Put`/`reader.Get` in matching
-order for every message; a mismatch is a silent wire bug and bumps
-`ProtocolVersion` constantly. Add small **read/write helpers** (e.g. a
-`MessageWriter`/`MessageReader` wrapper, or per-message static
-`Write(...)`/`Read(...)` methods co-located with the `MessageId`). Benefits:
-one definition of each message's layout, reused by both sides; new messages are
-a method, not a scavenger hunt. Vector/inventory/struct read-write get shared
-helpers (they're already duplicated). This directly de-risks every future
-feature that adds a message (EatRequest, AttackRequest, skill updates…).
+### Phase G — The authored world: cities, houses, ruins & growth  ·  rides §3.3 prefabs
 
-### 3.3 A server-side entity/actor system with interest management
+- **Authored POIs**: real cities, houses and abandoned constructions stamped into
+  the world as prefabs (§2.2), populated with **lootable containers** (`LootTableDef`,
+  §3.1) so exploration yields resources and gear.
+- **The shift to an authored world** (§2.2): the generator gains the prefab stamp
+  pass; procedural terrain becomes the *fill between* authored places.
+- **World growth to scale**: the region/server model and tooling to author and
+  stand up new regions over time, linked by voyages — the concrete path toward
+  "real-world size" without one seamless map.
+*Exit: the world has real places worth travelling to and looting, and can be
+extended region by region.*
 
-Creatures, dropped items, and future NPCs don't fit tiles-or-structures. Before
-Phase C, introduce a lightweight **authoritative entity** abstraction in the
-world-server: an id, position, kind, and per-tick behaviour, broadcast through
-the **interest-management path that already exists** for players (invariant #5 —
-extend it, don't fork it). Design it so players become just one entity kind.
-Keep behaviour rules (spawn, wander, aggro) in `sim-core` where they can be
-deterministic and tested. This is the one genuinely new subsystem; scope it only
-when Phase C needs it, but design the item-drop case in Phase A so harvested
-loot can later be a world entity rather than teleporting into inventory.
+### Phase H — Creatures, cooking & the food web  ·  rides §3.4 entity system
 
-### 3.4 Decompose the client into systems + a shared HUD/widget kit
+- **Animals & cooking ingredients**: a richer creature roster yielding meat,
+  hide, fat, ingredients. Hunting deepens; hides feed Phase F clothing; the food
+  web ties Phases C, E and F together.
+- **Cooking stations** (finishes Phase A's raw→cooked): the stove/fire turns raw
+  ingredients into meals with better food/health/buff values — recipes gated on a
+  cooking station (§Phase E).
+*Exit: food is a system (hunt → butcher → cook → eat/buff), not a berry.*
 
-`World3D.cs` is a 616-line god-script and `SurvivalHud.cs` is 419. Per the Godot
-guideline (no god-scenes, systems not `_Process` soup):
+### Phase I — Combat depth, firearms & ballistics  ·  rides §3.2 + §3.4
 
-- Split `World3D.cs` by responsibility: net dispatch, terrain streaming, local
-  player, remote players, interaction/targeting. The message dispatch should be
-  a table keyed by `MessageId` (mirrors §3.2), not a growing `switch`.
-- Build a **reusable touch-UI kit**: a meter/bar widget (hunger/stamina/health
-  share one), an item-slot widget (inventory/craft/build/hotbar reuse one), a
-  contextual action button. Every Phase-A/D UI addition then composes existing
-  widgets instead of new bespoke scenes. Pull icons from an icon package.
-- A single client-side **inventory model** that the HUD, craft panel, and build
-  panel all observe, rather than each re-reading packets.
+The scarce top of the tree (§2.1). Sequenced deliberately after E (materials),
+F (gear) and H (a reason to fight): melee → bows/thrown → **firearms**.
 
-### 3.5 Test & tuning scaffolding
+- **Server-authoritative ranged combat**: projectiles as entities (§3.4) or
+  hitscan with server validation; damage vs. the protection from Phase F gear.
+  Revisit the movement-authority note in `architecture.md` — competitive PvP may
+  justify the headless-Godot upgrade path there.
+- **The firearm tech tree**: gunpowder lab + gun workbench (§Phase E stations),
+  a **range of guns** as instance items with **attachments and durability**
+  (§3.2), and **scarce, crafted ammunition**. Guns are expensive, degrade, and
+  hunger for ammo — by design (§2.1).
+*Exit: a defended base and a stocked voyage are possible, and violence is
+expensive enough that karma (Phase K) can govern it.*
 
-- Keep the rule-in-`sim-core`-gets-a-test discipline; add tests for the new defs
-  (every item has a def, every recipe's inputs/outputs are real items, every
-  node becomes a real tile).
-- Move all balance numbers into one **`Tuning`-style config** (rates, yields,
-  night cost, food values) so balancing is one file, not a hunt. Some already
-  live in `Tuning`; make that the home for all of it.
+### Phase J — Clans & shared bases  ·  rides gateway + §3.3
 
-## 4. Suggested sequencing
+- **Clans** as a gateway-owned entity (like the character; invariant #3):
+  membership, roles, shared identity.
+- **Shared bases**: base ownership and build/access permissions over structures
+  and cube edits, shared clan storage, and a claimed territory. Structures and
+  diffs gain an owner (player or clan).
+*Exit: people can team up, hold ground together, and share a base and its stores.*
 
-1. **Foundation-first slice:** §3.1 registry + §3.2 proto helpers + §3.4 message
-   dispatch table. Refactor existing harvest/craft/place onto them — no new
-   gameplay yet, but proves the abstractions against known content.
-2. **Phase A on top:** food, campfire function, night pressure, tools — each now
-   a data addition. This is the release that makes Ashfall *a game*.
-3. **§3.4 UI kit + Phase D onboarding** in parallel with A's client work.
-4. **Phase B** progression; **§3.3 entity system** then **Phase C** creatures.
-5. Balancing pass throughout, against real mobile play.
+### Phase K — Karma, PvP law & destructibility  ·  rides Phases I + J
 
-The through-line: **spend the next unit of effort making survival a loop the
-player can win and want to repeat, and build the content registry that makes
-every subsequent survival mechanic a few rows of data instead of a cross-cutting
-code change.**
+- **Karma** on the gateway character: killing a lower-ranked player, or an
+  unclanned player while you are clanned, costs karma. **Low karma has real
+  effects** — e.g. hostile-flagged to others, barred from safe zones, worse NPC
+  prices, visible mark. This is the systemic answer to §2.1's "not a
+  slaughterhouse."
+- **Griefing & tearing down buildings**: structures and cubes become
+  **destructible** (HP, raid tools/explosives from Phase I). Raiding is
+  legitimate but **karma- and clan-gated** — raiding your own strengthens a clan
+  war; raiding the weak is punished. Base decay/upkeep keeps the world from
+  freezing into abandoned forts.
+*Exit: PvP and raiding exist, but the world nudges players away from slaughtering
+the weak, and consequences are felt.*
+
+### Phase L — Vehicles: cars & boats  ·  rides §3.4 entity system
+
+- **Vehicles as driveable entities** (`VehicleDef`, §3.1): cars for land, boats
+  for water — server-authoritative movement bounded like player movement
+  (`MovementRules`), fuel/condition as survival costs.
+- **Boats integrate with voyages**: the boat is the fiction and the vehicle for
+  the ocean crossing between regions (`voyage-transfer.md`), closing the loop with
+  the world-growth model.
+*Exit: players travel the growing world by land and sea under their own power.*
+
+### Continuous — Art, optimization & balancing
+
+The "better graphics, still low-res, highly optimized" mandate (§2.3) is a
+standing pass, not a phase: extend the surface-texel/low-res-render pipeline as
+content grows, hold the mobile budget (interest management, LOD, entity caps), and
+rebalance drain rates, yields, loot and combat against real mobile play every
+phase.
+
+---
+
+## 5. Sequencing & the through-line
+
+1. **Finish the near-term loop**: Phase B (skills, wall collision, digging & ore),
+   Phase C (creatures + melee), with Phase D polish continuous.
+2. **Lay the two content foundations** the vision hinges on: §3.1 registry scale-up
+   and §3.2 item instances. Almost everything below is blocked on these.
+3. **Phase E** (materials/stations/tech tree) — the spine the rest hangs from.
+4. **Phase F** (gear + underground shelter) and **Phase G** (authored world) — F
+   rides §3.2, G rides §3.3; they parallelise once their foundations land.
+5. **Phase H** (creatures/cooking), then **Phase I** (combat/firearms) — H gives I
+   a reason and materials; I stays deliberately late and scarce.
+6. **Phase J** (clans/bases) → **Phase K** (karma/PvP/destructibility): social
+   ownership before the consequences system that governs it.
+7. **Phase L** (vehicles) once the world is big enough to be worth crossing.
+
+The through-line, unchanged from day one: **make survival a loop worth repeating,
+and turn every new material, animal, building, garment and gun into content —
+rows of data over four solid foundations — so the world's possibilities really can
+be unlimited without the codebase fighting back.**

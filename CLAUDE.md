@@ -1,22 +1,27 @@
 # Ashfall — working agreement
 
-Open-source, **mobile-only** 2D pixel top-down survival game. Godot 4 client (C#),
-C# authoritative world-servers, many bounded worlds linked by ocean voyages.
+Open-source, **mobile-only** 3D low-resolution pixel-art survival game (third-person,
+"roblox-kind" look, optimized for mobile — see `architecture.md` §Projection).
+Godot 4 client (C#), C# authoritative world-servers, many bounded worlds linked by
+ocean voyages.
 
 Read `docs/architecture.md` and `docs/voyage-transfer.md` before changing
 anything structural. They are the source of truth; this file is how we work.
 
 ## Game vision (do not drift)
 
-- **Survival first.** Gather, craft, build, endure. Not a shooter, not an MMO
-  theme park. Every feature must answer: does this make surviving more
-  interesting?
+- **Survival first.** Gather, craft, build, endure. Not a run-and-gun shooter,
+  not an MMO theme park. Combat and firearms exist (see `gameplay-roadmap.md`
+  §2.1) but as a scarce, expensive, late-tech-tree survival capability governed by
+  karma — never the core loop. Every feature must answer: does this make surviving
+  more interesting?
 - **Mobile-only, touch-first.** One-thumb reachable UI, short sessions,
   low bandwidth, modest CPU/GPU/battery budget. No keyboard/mouse-first design.
 - **Bounded worlds, not one seamless map.** Regions are separate world-servers
   linked by voyages. Never propose a single global map.
 - **Server-authoritative.** The client predicts; the server decides.
-- **Readable pixel art.** Legibility on a small screen beats detail.
+- **Readable low-res 3D pixel-art.** Legibility on a small screen beats detail;
+  the low-resolution render is an optimization, not just a style.
 
 When a request conflicts with the vision, say so and propose an alternative
 that fits — don't silently implement the conflicting version.

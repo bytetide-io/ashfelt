@@ -1,7 +1,12 @@
 # Ashfall
 
-Open-source, mobile-only 2D pixel top-down survival game. Godot 4 client,
-C# authoritative world-servers, many bounded worlds linked by ocean voyages.
+Open-source, mobile-only 3D low-resolution pixel-art survival game (third-person,
+"roblox-kind" look, optimized for mobile). Godot 4 client, C# authoritative
+world-servers, many bounded worlds linked by ocean voyages.
+
+The long-horizon plan — from today's survival loop to countless materials, gear
+and firearms, an authored world of cities to loot, clans, karma-governed PvP and
+vehicles — lives in [`docs/gameplay-roadmap.md`](docs/gameplay-roadmap.md).
 
 ## Layout
 
