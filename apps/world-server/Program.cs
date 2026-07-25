@@ -23,6 +23,13 @@ var writer = new NetDataWriter();
 int nextPlayerId = 1;
 long tick = 0;
 
+// A disconnect's save is fire-and-forget so a slow write never stalls the
+// players still in the world; this tracks it so a fast reconnect can wait for
+// its own write instead of racing it. See PendingSaveTracker for why the race
+// matters — it is a real progress-loss bug on the flaky reconnects mobile
+// clients see often (backgrounding, wifi/cellular handoff).
+var pendingSaves = new PendingSaveTracker();
+
 var listener = new EventBasedNetListener();
 var server = new NetManager(listener) { UpdateTime = 15 };
 
@@ -53,7 +60,7 @@ listener.PeerDisconnectedEvent += (peer, info) =>
     {
         var characterId = player.CharacterId;
         var snapshot = player.ToCharacterState();
-        _ = Task.Run(async () =>
+        var save = Task.Run(async () =>
         {
             try { await gateway.SaveCharacterAsync(characterId, snapshot); }
             catch (Exception ex)
@@ -61,6 +68,7 @@ listener.PeerDisconnectedEvent += (peer, info) =>
                 Console.Error.WriteLine($"[world] character save failed for {characterId}: {ex.Message}");
             }
         });
+        pendingSaves.Track(characterId, save);
     }
 
     writer.Reset();
@@ -115,7 +123,14 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // now. Blocking the loop here is deliberate: joining is inherently a
             // wait, and seeding synchronously keeps the inventory the tick loop
             // reads free of cross-thread mutation. Saves, by contrast, are
-            // fire-and-forget so a leaving player never stalls the others.
+            // fire-and-forget so a leaving player never stalls the others — which
+            // is exactly why a reconnect must wait for its own character's save to
+            // land first: without this, a fast reconnect (the norm on mobile, where
+            // backgrounding and wifi/cellular handoff both drop the socket) can read
+            // the row out from under its own in-flight save and then overwrite that
+            // save with stale state when it disconnects again, silently rolling the
+            // character back and losing everything gathered in between.
+            pendingSaves.WaitFor(player.CharacterId);
             try
             {
                 var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
