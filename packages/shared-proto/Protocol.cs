@@ -158,4 +158,12 @@ public static class Tuning
 
     /// <summary>Heartbeat cadence for survival meters when nothing changed.</summary>
     public const int StatsHeartbeatTicks = TicksPerSecond * 2;
+
+    /// <summary>
+    /// Max time to wait on a gateway HTTP call before giving up. Join and voyage
+    /// handling deliberately block the world-server's single tick loop (see
+    /// Program.cs), so this bounds how long a gateway hiccup can stall every
+    /// connected player, rather than the ~100s HttpClient default.
+    /// </summary>
+    public const int GatewayTimeoutSeconds = 5;
 }
