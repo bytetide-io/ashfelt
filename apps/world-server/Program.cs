@@ -105,6 +105,10 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                 if (!claimed)
                 {
                     Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
+                    // Undo the CharacterId set above: otherwise PeerDisconnectedEvent
+                    // sees a non-empty id on a player who never loaded anything and
+                    // saves this blank Player back over the real character.
+                    player.CharacterId = Guid.Empty;
                     peer.Disconnect();
                     break;
                 }
@@ -118,10 +122,23 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // fire-and-forget so a leaving player never stalls the others.
             try
             {
-                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
+                var character = gateway.GetCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
                 if (character is not null) player.LoadCharacter(character);
                 Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
                                   (character is null ? "is new" : "loaded"));
+            }
+            catch (CharacterOwnedElsewhereException ex)
+            {
+                // Another world-server already holds this character — admitting
+                // the join here is exactly the duplication bug this guards
+                // against, so refuse rather than start the player from a stale
+                // or conflicting copy of their inventory. Clear CharacterId first,
+                // same reason as the bad-ticket rejection above: this Player never
+                // loaded anything and must not save a blank state over the real one.
+                Console.WriteLine($"[world] rejecting player {player.Id}: {ex.Message}");
+                player.CharacterId = Guid.Empty;
+                peer.Disconnect();
+                break;
             }
             catch (Exception ex)
             {

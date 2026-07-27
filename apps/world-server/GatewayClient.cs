@@ -19,13 +19,20 @@ public sealed class GatewayClient
     }
 
     /// <summary>
-    /// Fetches a character, or null when the gateway has none yet (a fresh
-    /// device UUID) — the caller then starts the player empty and full.
+    /// Fetches a character and claims it for <paramref name="worldId"/>. A fresh
+    /// device UUID is created with defaults (empty inventory, full meters) and
+    /// claimed the same way — the gateway's join endpoint is get-or-create, so
+    /// this returns null only in the (unreachable in practice) case the gateway
+    /// still reports not-found. Throws <see cref="CharacterOwnedElsewhereException"/>
+    /// when another world already owns the character, so a duplicate join can
+    /// never load the same inventory into two world-servers at once.
     /// </summary>
-    public async Task<CharacterState?> GetCharacterAsync(Guid id)
+    public async Task<CharacterState?> GetCharacterAsync(Guid id, string worldId)
     {
-        var response = await _http.GetAsync($"/characters/{id}");
+        var response = await _http.GetAsync($"/characters/{id}?worldId={Uri.EscapeDataString(worldId)}");
         if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        if (response.StatusCode == HttpStatusCode.Conflict)
+            throw new CharacterOwnedElsewhereException(await response.Content.ReadAsStringAsync());
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<CharacterState>();
     }
@@ -71,3 +78,9 @@ public sealed record VoyageGrant
     public int TargetPort { get; init; }
     public Guid Ticket { get; init; }
 }
+
+/// <summary>
+/// A character load was rejected because another world-server already owns
+/// it. The caller must not admit the joining player.
+/// </summary>
+public sealed class CharacterOwnedElsewhereException(string message) : Exception(message);

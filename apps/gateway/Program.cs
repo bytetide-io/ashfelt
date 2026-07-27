@@ -41,35 +41,82 @@ app.MapGet("/worlds", () => Results.Ok(worlds.Values));
 // ticket self-heals — ownership returns to the world the character left.
 const int TicketTtlSeconds = 60;
 
-// Character load: returns the stored inventory + survival meters, or 404 when
-// the device UUID has never saved a character.
-app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
+// How long an ownership claim (see owner_claimed_at) is honoured with no save
+// to renew it. A clean leave always clears ownership on save (see PUT below),
+// so this only matters when a world-server crashes mid-session and never gets
+// to save — long enough that no real session is mistaken for abandoned, short
+// enough that a crashed world doesn't lock a character out for good.
+const int OwnershipStaleAfterHours = 12;
+
+// Character load: returns the stored inventory + survival meters — freshly
+// defaulted (empty inventory, full meters) the first time a device UUID is
+// ever seen. Also claims ownership for worldId as part of the load, creating
+// the row if needed: a normal join, including a character's very first ever
+// join, is as much an ownership claim as a voyage is. Without claiming here
+// too, a brand-new character could join two world-servers at once before
+// either had a row to claim — the same duplication bug, just narrowed to the
+// first-join race instead of closed. Fails with 409 when another (non-stale)
+// world already holds it.
+app.MapGet("/characters/{id:guid}", async (Guid id, string? worldId, NpgsqlDataSource db) =>
 {
+    if (string.IsNullOrWhiteSpace(worldId))
+        return Results.BadRequest(new { error = "worldId is required" });
+
     // Self-heal a stranded voyage: if this character has a ticket that expired
     // unclaimed, ownership returns to the world it left before we hand the state
     // back. This is what makes a crash mid-transfer recover without an operator —
     // the player simply reconnects and is loaded as if the voyage never began.
     await ReclaimExpiredTicketAsync(db, id);
 
-    await using var cmd = db.CreateCommand(
-        "SELECT inventory, hunger, stamina, health, warmth FROM character WHERE id = $1");
-    cmd.Parameters.AddWithValue(id);
+    // Get-or-create-and-claim, atomically: an INSERT that only falls back to
+    // UPDATE on conflict, and only updates when the ownership guard passes —
+    // nobody owns the row yet (including "the row doesn't exist yet", which
+    // the INSERT branch handles directly), this world already does (a
+    // reconnect), or the existing claim is stale. Postgres row locking
+    // serialises two concurrent claims for the same character; only one wins.
+    await using var claim = db.CreateCommand($"""
+        INSERT INTO character (id, owner_world_id, owner_claimed_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (id) DO UPDATE SET
+            owner_world_id = $2, owner_claimed_at = now()
+        WHERE character.owner_world_id IS NULL
+           OR character.owner_world_id = $2
+           OR character.owner_claimed_at < now() - interval '{OwnershipStaleAfterHours} hours'
+        RETURNING inventory, hunger, stamina, health, warmth
+        """);
+    claim.Parameters.AddWithValue(id);
+    claim.Parameters.AddWithValue(worldId);
 
-    await using var reader = await cmd.ExecuteReaderAsync();
-    if (!await reader.ReadAsync()) return Results.NotFound();
-
-    var character = new CharacterState
+    await using (var claimed = await claim.ExecuteReaderAsync())
     {
-        Inventory = reader.GetFieldValue<Dictionary<string, int>>(0),
-        Hunger = reader.GetInt32(1),
-        Stamina = reader.GetInt32(2),
-        Health = reader.GetInt32(3),
-        Warmth = reader.GetInt32(4),
-    };
-    return Results.Ok(character);
+        if (await claimed.ReadAsync())
+        {
+            var character = new CharacterState
+            {
+                Inventory = claimed.GetFieldValue<Dictionary<string, int>>(0),
+                Hunger = claimed.GetInt32(1),
+                Stamina = claimed.GetInt32(2),
+                Health = claimed.GetInt32(3),
+                Warmth = claimed.GetInt32(4),
+            };
+            return Results.Ok(character);
+        }
+    }
+
+    // No row returned: the row already existed (otherwise the INSERT branch
+    // would have created and claimed it) and another world owns it, not stale.
+    await using var owner = db.CreateCommand("SELECT owner_world_id FROM character WHERE id = $1");
+    owner.Parameters.AddWithValue(id);
+    var existingOwner = await owner.ExecuteScalarAsync();
+    if (existingOwner is null) return Results.NotFound();
+
+    return Results.Conflict(new { error = $"character already owned by '{existingOwner}'" });
 });
 
 // Character save: upsert the character, creating the row on first save.
+// Also releases ownership — the two call sites (a player disconnecting, and a
+// voyage release saving before it mints a ticket) are both "this world is done
+// with the character" moments, so a save is exactly when it should let go.
 app.MapPut("/characters/{id:guid}", async (Guid id, CharacterState character, NpgsqlDataSource db) =>
 {
     await using var cmd = db.CreateCommand("""
@@ -81,6 +128,8 @@ app.MapPut("/characters/{id:guid}", async (Guid id, CharacterState character, Np
             stamina = EXCLUDED.stamina,
             health = EXCLUDED.health,
             warmth = EXCLUDED.warmth,
+            owner_world_id = NULL,
+            owner_claimed_at = NULL,
             updated_at = now()
         """);
     cmd.Parameters.AddWithValue(id);
@@ -172,7 +221,7 @@ app.MapPost("/voyage/claim", async (VoyageClaim req, NpgsqlDataSource db) =>
         WITH consumed AS (
             DELETE FROM voyage_ticket WHERE character_id = $1 RETURNING character_id
         )
-        UPDATE character SET owner_world_id = $2
+        UPDATE character SET owner_world_id = $2, owner_claimed_at = now()
         WHERE id = (SELECT character_id FROM consumed)
         """);
     claim.Parameters.AddWithValue(req.CharacterId);
