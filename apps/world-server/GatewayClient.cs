@@ -19,21 +19,34 @@ public sealed class GatewayClient
     }
 
     /// <summary>
-    /// Fetches a character, or null when the gateway has none yet (a fresh
-    /// device UUID) — the caller then starts the player empty and full.
+    /// Fetches a character while claiming ownership for <paramref name="worldId"/>
+    /// (this world-server's own id). A character is owned by exactly one world at
+    /// a time, so this can come back three ways: freshly claimed or already ours
+    /// (<see cref="CharacterLoadStatus.Loaded"/>), never saved before
+    /// (<see cref="CharacterLoadStatus.New"/> — the caller starts the player empty
+    /// and full), or currently owned by a different world
+    /// (<see cref="CharacterLoadStatus.Denied"/> — the caller must reject the
+    /// join rather than load a character two worlds could mutate at once).
     /// </summary>
-    public async Task<CharacterState?> GetCharacterAsync(Guid id)
+    public async Task<CharacterLoadResult> GetCharacterAsync(Guid id, string worldId)
     {
-        var response = await _http.GetAsync($"/characters/{id}");
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        var response = await _http.GetAsync($"/characters/{id}?worldId={Uri.EscapeDataString(worldId)}");
+        if (response.StatusCode == HttpStatusCode.NotFound) return new CharacterLoadResult(CharacterLoadStatus.New, null);
+        if (response.StatusCode == HttpStatusCode.Conflict) return new CharacterLoadResult(CharacterLoadStatus.Denied, null);
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<CharacterState>();
+        var character = await response.Content.ReadFromJsonAsync<CharacterState>();
+        return new CharacterLoadResult(CharacterLoadStatus.Loaded, character);
     }
 
-    /// <summary>Upserts a character, creating it on first save.</summary>
-    public async Task SaveCharacterAsync(Guid id, CharacterState character)
+    /// <summary>
+    /// Upserts a character, creating it on first save. <paramref name="worldId"/>
+    /// releases this world's ownership claim as part of the same write, so a
+    /// clean leave (or a superseded duplicate connection) never leaves the
+    /// character permanently locked to a world nobody is playing on.
+    /// </summary>
+    public async Task SaveCharacterAsync(Guid id, CharacterState character, string worldId)
     {
-        var response = await _http.PutAsJsonAsync($"/characters/{id}", character);
+        var response = await _http.PutAsJsonAsync($"/characters/{id}?worldId={Uri.EscapeDataString(worldId)}", character);
         response.EnsureSuccessStatusCode();
     }
 
@@ -71,3 +84,8 @@ public sealed record VoyageGrant
     public int TargetPort { get; init; }
     public Guid Ticket { get; init; }
 }
+
+public enum CharacterLoadStatus { New, Loaded, Denied }
+
+/// <summary>Outcome of a claim-and-load attempt; see <see cref="GatewayClient.GetCharacterAsync"/>.</summary>
+public readonly record struct CharacterLoadResult(CharacterLoadStatus Status, CharacterState? Character);

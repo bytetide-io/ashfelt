@@ -55,7 +55,7 @@ listener.PeerDisconnectedEvent += (peer, info) =>
         var snapshot = player.ToCharacterState();
         _ = Task.Run(async () =>
         {
-            try { await gateway.SaveCharacterAsync(characterId, snapshot); }
+            try { await gateway.SaveCharacterAsync(characterId, snapshot, worldId); }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[world] character save failed for {characterId}: {ex.Message}");
@@ -90,6 +90,23 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             reader.GetBytes(uuidBytes, 16);
             player.CharacterId = new Guid(uuidBytes);
 
+            // A character may be live on only one connection at a time. A second
+            // Hello for the same CharacterId — a flaky-mobile reconnect racing its
+            // own not-yet-timed-out socket, most plausibly — evicts the older
+            // session rather than letting both hold independent in-memory
+            // inventories until whichever disconnects last silently wins the save.
+            var stale = players.FirstOrDefault(kvp => kvp.Key != peer && kvp.Value.CharacterId == player.CharacterId);
+            if (stale.Key is not null)
+            {
+                Console.WriteLine($"[world] character {player.CharacterId} reconnected — evicting stale player {stale.Value.Id}");
+                players.Remove(stale.Key);
+                writer.Reset();
+                writer.Put((byte)MessageId.PlayerLeft);
+                writer.Put(stale.Value.Id);
+                Broadcast(writer, exclude: peer);
+                stale.Key.Disconnect();
+            }
+
             string ticketText = reader.GetString();
 
             // A voyage arrival carries a ticket: this server must claim ownership
@@ -118,10 +135,17 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // fire-and-forget so a leaving player never stalls the others.
             try
             {
-                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
-                if (character is not null) player.LoadCharacter(character);
+                var result = gateway.GetCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
+                if (result.Status == CharacterLoadStatus.Denied)
+                {
+                    Console.WriteLine($"[world] rejecting join for {player.CharacterId}: owned by another world");
+                    peer.Disconnect();
+                    break;
+                }
+
+                if (result.Status == CharacterLoadStatus.Loaded) player.LoadCharacter(result.Character!);
                 Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
-                                  (character is null ? "is new" : "loaded"));
+                                  (result.Status == CharacterLoadStatus.New ? "is new" : "loaded"));
             }
             catch (Exception ex)
             {
@@ -319,7 +343,7 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             VoyageGrant? grant;
             try
             {
-                gateway.SaveCharacterAsync(player.CharacterId, player.ToCharacterState())
+                gateway.SaveCharacterAsync(player.CharacterId, player.ToCharacterState(), worldId)
                     .GetAwaiter().GetResult();
                 grant = gateway.RequestVoyageAsync(player.CharacterId, worldId, targetWorldId)
                     .GetAwaiter().GetResult();

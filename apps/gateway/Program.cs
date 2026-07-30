@@ -41,9 +41,20 @@ app.MapGet("/worlds", () => Results.Ok(worlds.Values));
 // ticket self-heals — ownership returns to the world the character left.
 const int TicketTtlSeconds = 60;
 
-// Character load: returns the stored inventory + survival meters, or 404 when
-// the device UUID has never saved a character.
-app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
+// Character load: claims ownership for the calling world and returns the
+// stored inventory + survival meters, or 404 when the device UUID has never
+// saved a character. `worldId` is the calling world-server's own id, the same
+// value it would pass as `fromWorldId` to /voyage.
+//
+// A character is owned by exactly one world-server at a time
+// (docs/voyage-transfer.md) — this must hold for an ordinary join, not just a
+// voyage arrival, or two live sessions for the same id (two peers, or two
+// world-servers) each get an independent in-memory inventory until whichever
+// disconnects last silently wins the save. The UPDATE's WHERE clause is the
+// atomic claim: it succeeds when nobody owns the character yet, or when this
+// same world already does (a reconnect); it claims nothing when another world
+// currently owns it, and the caller must reject the join.
+app.MapGet("/characters/{id:guid}", async (Guid id, string worldId, NpgsqlDataSource db) =>
 {
     // Self-heal a stranded voyage: if this character has a ticket that expired
     // unclaimed, ownership returns to the world it left before we hand the state
@@ -51,37 +62,62 @@ app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
     // the player simply reconnects and is loaded as if the voyage never began.
     await ReclaimExpiredTicketAsync(db, id);
 
-    await using var cmd = db.CreateCommand(
-        "SELECT inventory, hunger, stamina, health, warmth FROM character WHERE id = $1");
-    cmd.Parameters.AddWithValue(id);
+    await using var claim = db.CreateCommand("""
+        UPDATE character SET owner_world_id = $2
+        WHERE id = $1 AND (owner_world_id IS NULL OR owner_world_id = $2)
+        RETURNING inventory, hunger, stamina, health, warmth
+        """);
+    claim.Parameters.AddWithValue(id);
+    claim.Parameters.AddWithValue(worldId);
 
-    await using var reader = await cmd.ExecuteReaderAsync();
-    if (!await reader.ReadAsync()) return Results.NotFound();
-
-    var character = new CharacterState
+    await using (var reader = await claim.ExecuteReaderAsync())
     {
-        Inventory = reader.GetFieldValue<Dictionary<string, int>>(0),
-        Hunger = reader.GetInt32(1),
-        Stamina = reader.GetInt32(2),
-        Health = reader.GetInt32(3),
-        Warmth = reader.GetInt32(4),
-    };
-    return Results.Ok(character);
+        if (await reader.ReadAsync())
+        {
+            return Results.Ok(new CharacterState
+            {
+                Inventory = reader.GetFieldValue<Dictionary<string, int>>(0),
+                Hunger = reader.GetInt32(1),
+                Stamina = reader.GetInt32(2),
+                Health = reader.GetInt32(3),
+                Warmth = reader.GetInt32(4),
+            });
+        }
+    }
+
+    // The claim matched no row: either this device UUID has never saved a
+    // character (fine — the world-server starts it fresh), or the row exists
+    // but a different world currently owns it (reject — it must arrive here via
+    // voyage, never be loaded on two worlds at once).
+    await using var ownerLookup = db.CreateCommand("SELECT owner_world_id FROM character WHERE id = $1");
+    ownerLookup.Parameters.AddWithValue(id);
+    var owner = await ownerLookup.ExecuteScalarAsync();
+    return owner is null
+        ? Results.NotFound()
+        : Results.Conflict(new { error = $"character owned by world '{owner}'" });
 });
 
 // Character save: upsert the character, creating the row on first save.
-app.MapPut("/characters/{id:guid}", async (Guid id, CharacterState character, NpgsqlDataSource db) =>
+// `worldId` releases ownership back to unowned as part of the same write, but
+// only if this world still holds it — a save from a session this world-server
+// has already superseded (e.g. an evicted duplicate connection) must not clear
+// a claim made by whoever holds the character now.
+app.MapPut("/characters/{id:guid}", async (Guid id, string worldId, CharacterState character, NpgsqlDataSource db) =>
 {
     await using var cmd = db.CreateCommand("""
-        INSERT INTO character (id, inventory, hunger, stamina, health, warmth, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, now())
+        INSERT INTO character (id, inventory, hunger, stamina, health, warmth, owner_world_id, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NULL, now())
         ON CONFLICT (id) DO UPDATE SET
             inventory = EXCLUDED.inventory,
             hunger = EXCLUDED.hunger,
             stamina = EXCLUDED.stamina,
             health = EXCLUDED.health,
             warmth = EXCLUDED.warmth,
-            updated_at = now()
+            updated_at = now(),
+            owner_world_id = CASE
+                WHEN character.owner_world_id = $7 THEN NULL
+                ELSE character.owner_world_id
+            END
         """);
     cmd.Parameters.AddWithValue(id);
     cmd.Parameters.Add(new NpgsqlParameter
@@ -93,6 +129,7 @@ app.MapPut("/characters/{id:guid}", async (Guid id, CharacterState character, Np
     cmd.Parameters.AddWithValue(character.Stamina);
     cmd.Parameters.AddWithValue(character.Health);
     cmd.Parameters.AddWithValue(character.Warmth);
+    cmd.Parameters.AddWithValue(worldId);
     await cmd.ExecuteNonQueryAsync();
 
     return Results.Ok();
