@@ -87,4 +87,25 @@ public static class HarvestRules
     /// <summary>The tool class that speeds this tile's harvest, or None.</summary>
     public static ToolClass PreferredTool(TileType tile) =>
         ByTile.TryGetValue(tile, out var node) ? node.PreferredTool : ToolClass.None;
+
+    /// <summary>
+    /// Minimum real time between one player's accepted harvest strikes, on any
+    /// node. Without this, a strike costs nothing but a packet: a client that
+    /// sends <c>ChopRequest</c> faster than a human taps can fell nodes and
+    /// collect resources at unbounded speed, since <see cref="Evaluate"/> and
+    /// <see cref="HitsToFell"/> only ever look at what tool is held, never at
+    /// how quickly strikes arrive.
+    /// </summary>
+    public const double StrikeCooldownSeconds = 0.35;
+
+    /// <summary>
+    /// True once <see cref="StrikeCooldownSeconds"/> have elapsed since
+    /// <paramref name="lastStrikeAt"/>. Mirrors <see cref="MovementRules"/>'s
+    /// elapsed-time budget: gated by time since the last *accepted* strike, so
+    /// spamming requests cannot buy extra strikes the way spamming updates
+    /// cannot buy extra movement distance. The caller records <paramref
+    /// name="now"/> as the new last-strike time only when this returns true.
+    /// </summary>
+    public static bool CanStrike(double lastStrikeAt, double now) =>
+        now - lastStrikeAt >= StrikeCooldownSeconds;
 }

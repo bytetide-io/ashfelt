@@ -4,6 +4,79 @@ Ranked ideas and findings not yet built/fixed, newest audit first. Score is
 Severity(1-5) × Blast radius(1-5) at the time it was logged — re-score if you
 suspect the codebase has moved since.
 
+## From 2026-07-31 audit
+
+**Process note for future nights:** this session initially built and audited
+against a badly stale branch (its last common ancestor with `main` was ~7
+days and 53 files behind, missing the ownership-claim fix below *and* an
+entire building/blueprint system). Always `git fetch origin main` and diff
+against it before auditing — see `LOG.md` 2026-07-31 for the full account.
+The findings below are re-verified against current `main`.
+
+### Multiplayer correctness
+
+- **[FIXED 2026-07-31]** ~~`ChopRequest` had no per-player cooldown, only a
+  reach check — a client sending it faster than a human taps could fell
+  nodes and collect wood/stone/fiber/berries at unbounded, persisted speed~~
+  — see `LOG.md`. Severity 4 × Blast radius 4 = **16**.
+
+- **No interest management on the `PlayerStates` broadcast.** The tick loop
+  in `apps/world-server/Program.cs` builds one packet listing *every*
+  connected player and sends it to *every* connected player, unconditionally
+  — violates invariant #6 (a client only ever receives entities near it) for
+  players specifically; chunks are already correctly client-requested and
+  filtered. Cost is O(N) per client per tick, O(N²) total bytes/tick
+  world-wide. Score: Severity 3 × Blast radius 4 = **12** (invisible at
+  today's handful of concurrent players; doesn't get less true as population
+  grows, and nothing currently caps players per world-server). **Not fixed
+  tonight — but a fix already exists, unmerged:** PR #14 ("world-server:
+  filter PlayerStates broadcast by interest range") adds exactly this
+  (`InterestRules` in `sim-core`, tested), stacked under PRs #15/#16 on
+  branches `rebase/interest-filtering` → `rebase/save-reconnect-race` →
+  `rebase/gateway-timeout`, all open and unmerged as of 2026-07-31. Check
+  those before re-implementing.
+
+- **Gateway character endpoints trust any caller who knows the UUID.** This
+  is distinct from the ownership-*claim* mechanism (`POST
+  /characters/{id}/claim`, fixed 2026-07-24) — claiming prevents two worlds
+  loading the same character *concurrently*, but nothing stops any client
+  that knows or guesses a device UUID from claiming/loading/overwriting that
+  character's inventory and survival meters; there is no per-character
+  secret. Explicitly a deliberate simplification for the device-UUID model
+  (`docs/architecture.md`), not a regression, and not urgent while the
+  gateway is only reachable from trusted world-servers in a closed test.
+  Score: Severity 3 × Blast radius 3 = **9**. Flagging so it isn't forgotten
+  before any public deployment.
+
+### Architecture / maintainability
+
+- `World3D.cs` and `SurvivalHud.cs` (see the 2026-07-24 entries below) have
+  grown further: **1103 lines** and **1124 lines** respectively as of
+  2026-07-31 (both driven mostly by the new building/blueprint client UI —
+  `ArchitectCamera.cs`, `ArchitectController.cs`, `BlueprintPieces3D.cs`,
+  `BlueprintView.cs` exist as separate files already, so the god-script
+  growth is in the *HUD panel* and *net-dispatch* halves, not the new
+  feature itself). Same fix, same score (9 each) — not re-litigating,
+  just refreshing the numbers so nobody picks this up thinking it shrank.
+- `CraftRequest`/`PlaceRequest` have no rate limit either, unlike chopping
+  (now fixed). Unlike chopping, both are bounded by inventory the player
+  already holds, so spam can't manufacture resources — only convert/place
+  faster than intended. Score: Severity 2 × Blast radius 2 = **4**. Revisit
+  only if that turns out to matter for feel or a future PvP building-race.
+- `HarvestRules.Evaluate`/`HitsToFell` still have no *direct* unit tests
+  (only indirect coverage via `WorldTests.cs`). Tonight added direct tests
+  for the new `CanStrike` cooldown only (`HarvestRulesTests.cs`).
+
+### Still true, not re-scored (see 2026-07-24 section below for detail)
+
+World-server blocking on gateway HTTP calls (20), `World3D.UpdateGatherPrompt`
+mobile-perf (12), `WorldConnection.OnReceive` dispatch switch (9), foliage
+triplication (6), node-path coupling (4), no migration runner (unscored), no
+test project for gateway/world-server (12) — the last of these is also
+addressed in part by open PR #15 ("Fix character-save/reconnect race") and
+PR #16 ("bound gateway timeout, catch voyage-claim failures"), both unmerged
+as of 2026-07-31.
+
 ## From 2026-07-24 audit
 
 ### Multiplayer correctness
@@ -28,7 +101,9 @@ suspect the codebase has moved since.
   change than "ship one thing and be done" allows for a single night, and it
   deserves its own dedicated session with room to actually reason about the
   pending-state lifecycle (what happens if the peer disconnects mid-claim,
-  etc.) rather than being squeezed in alongside another fix.
+  etc.) rather than being squeezed in alongside another fix. **Update
+  2026-07-31:** PR #16 ("bound gateway timeout, catch voyage-claim
+  failures") addresses part of this — open, unmerged.
 
 ### Mobile performance
 
@@ -43,24 +118,26 @@ suspect the codebase has moved since.
 
 ### Architecture / maintainability
 
-- **`SurvivalHud.cs` is 940 lines** (`apps/client/scripts/ui/SurvivalHud.cs`
-  per the client audit — grown from the 419 cited in
-  `docs/gameplay-roadmap.md` §3.4, not shrunk). One class builds 4 survival
-  meters, the day/night chip, touch stick + jump button, hotbar, gather
-  prompt, and a full tabbed action sheet (inventory/craft/build/travel) with
-  its own tab state machine and business logic (`RefreshActionAvailability`
-  calling `CraftingRules.CanCraft` directly). No reusable meter/slot widget
-  exists — `AddMeter`, `HotbarSlotFor`, `GridSlot`, `BuildCraftCard`,
-  `BuildPlaceCard` each hand-build near-identical layouts. Score: Severity 3
-  × Blast radius 3 = **9**. Fix: extract a `MeterRow` and one `ItemSlot`
-  widget reused by hotbar/inventory/craft/place; split the action sheet into
-  its own scene/controller (roadmap §3.4).
+- **`SurvivalHud.cs`** (`apps/client/scripts/world3d/SurvivalHud.cs` — note:
+  the path in this entry was originally recorded as `scripts/ui/`, corrected
+  2026-07-31) was 940 lines, now 1124 (see 2026-07-31 section above). One
+  class builds 4 survival meters, the day/night chip, touch stick + jump
+  button, hotbar, gather prompt, and a full tabbed action sheet
+  (inventory/craft/build/travel) with its own tab state machine and business
+  logic (`RefreshActionAvailability` calling `CraftingRules.CanCraft`
+  directly). No reusable meter/slot widget exists — `AddMeter`,
+  `HotbarSlotFor`, `GridSlot`, `BuildCraftCard`, `BuildPlaceCard` each
+  hand-build near-identical layouts. Score: Severity 3 × Blast radius 3 =
+  **9**. Fix: extract a `MeterRow` and one `ItemSlot` widget reused by
+  hotbar/inventory/craft/place; split the action sheet into its own
+  scene/controller (roadmap §3.4).
 
-- **`World3D.cs` is 735 lines**, up from 616, mixing net dispatch, day/night
-  lighting, procedural foliage generation, touch-input classification,
-  harvest-target scanning, and structure placement/mesh building in one
-  script. Score: Severity 3 × Blast radius 3 = **9**. Fix: split per roadmap
-  §3.4 into separate nodes/systems World3D composes.
+- **`World3D.cs`** was 735 lines, now 1103 (see 2026-07-31 section above),
+  mixing net dispatch, day/night lighting, procedural foliage generation,
+  touch-input classification, harvest-target scanning, and structure
+  placement/mesh building in one script. Score: Severity 3 × Blast radius 3
+  = **9**. Fix: split per roadmap §3.4 into separate nodes/systems World3D
+  composes.
 
 - **`WorldConnection.cs:299-420` `OnReceive`** is a 12-case hand-decoded
   switch on `MessageId` with wire order that must exactly match the server's
@@ -97,18 +174,18 @@ suspect the codebase has moved since.
 ### Testing
 
 - **No test coverage at all for `apps/gateway` or `apps/world-server`** — only
-  `sim-core` has a test project. The ownership-claim fix landed tonight
+  `sim-core` has a test project. The ownership-claim fix landed 2026-07-24
   (`POST /characters/{id}/claim`) has no automated regression test; it was
-  verified by manual code review only (see `LOG.md` — no dotnet SDK available
-  this session). A future night should add an integration test project that
-  spins up the gateway against a real (or testcontainers) Postgres and
-  exercises the claim/voyage/save endpoints directly, including the
-  concurrent-claim race this fix targets.
+  verified by manual code review only. A future night should add an
+  integration test project that spins up the gateway against a real (or
+  testcontainers) Postgres and exercises the claim/voyage/save endpoints
+  directly, including the concurrent-claim race this fix targets.
 
 ## Rejected feature ideas (logged per Phase-2 discipline, not built — audit
 found a fix-tonight-caliber bug first, so Phase 2 wasn't reached)
 
-None yet — Phase 2 (new feature) was skipped tonight because the audit
-surfaced a multiplayer-correctness finding scoring 20 (over the 15 threshold,
-and over the 9 threshold on the multiplayer-correctness track), which the
-routine's decision rule requires fixing instead of building new content.
+None yet — every night so far has surfaced a multiplayer-correctness finding
+clearing the fix-tonight threshold before Phase 2 was reached. If a future
+audit ever comes back clean, `docs/gameplay-roadmap.md` has a ranked list of
+what to build next (campfire cooking, skills/proficiency, wall collision,
+the server-side entity/actor system for creatures).

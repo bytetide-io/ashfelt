@@ -278,6 +278,13 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                 Console.WriteLine($"[world] player {player.Id} chop out of range at ({tx},{ty})");
                 break;
             }
+            if (!player.TryConsumeChopCooldown(Now()))
+            {
+                // Silently dropped, not disconnected: normal play can legitimately
+                // queue a tap right after one lands, and the next tap just lands
+                // on the following cooldown window instead.
+                break;
+            }
 
             // A tool matching the node speeds the gather: resolve the node's
             // preferred class, then how good a tool of that class the player holds.

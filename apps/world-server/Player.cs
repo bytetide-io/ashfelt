@@ -37,6 +37,9 @@ public sealed class Player
     /// <summary>Server time of the last accepted position, for speed budgeting.</summary>
     public double LastAcceptedAt { get; private set; }
 
+    /// <summary>Server time of the last accepted harvest strike, for chop-rate budgeting.</summary>
+    public double LastChopAt { get; private set; } = double.NegativeInfinity;
+
     public int Rejections { get; private set; }
 
     public Dictionary<ItemId, int> Inventory { get; } = new();
@@ -200,6 +203,20 @@ public sealed class Player
         Yaw = yaw;
         LastAcceptedAt = now;
         return MoveRejection.None;
+    }
+
+    /// <summary>
+    /// True once per <see cref="HarvestRules.StrikeCooldownSeconds"/>: a client
+    /// spamming <c>ChopRequest</c> gets one strike accepted per cooldown window,
+    /// exactly as <see cref="TryAccept"/> budgets movement by elapsed time rather
+    /// than update count. Records <paramref name="now"/> as the new last-strike
+    /// time only when it returns true.
+    /// </summary>
+    public bool TryConsumeChopCooldown(double now)
+    {
+        if (!HarvestRules.CanStrike(LastChopAt, now)) return false;
+        LastChopAt = now;
+        return true;
     }
 
     public bool IsWithinReach(int tileX, int tileY)
