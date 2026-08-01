@@ -4,6 +4,8 @@
 // generates and stores locally. World-servers load a character on join and
 // save it on leave over the REST endpoints below.
 
+using System.Security.Cryptography;
+using System.Text;
 using Ashfall.Proto;
 using Npgsql;
 
@@ -17,11 +19,31 @@ string conn = Environment.GetEnvironmentVariable("ASHFALL_DB")
     ?? throw new InvalidOperationException(
         "ASHFALL_DB is not set — the gateway requires a database for character storage.");
 
+// Shared secret between the gateway and world-servers, mirroring the UDP
+// world-server's ASHFALL_CONNECT_KEY. Character state (invariant #3) is only
+// ever meant to move between a trusted world-server and the gateway — the
+// client never reads or writes it directly — so /characters and /voyage* are
+// gated on this key. /health and /worlds stay open: /worlds is the public
+// destination list the client's travel menu reads directly.
+string gatewayKey = Environment.GetEnvironmentVariable("ASHFALL_GATEWAY_KEY") ?? "ashfall";
+
 // EnableDynamicJson lets Npgsql read/write the JSONB inventory column directly
 // as a Dictionary<string,int> via System.Text.Json.
 builder.Services.AddNpgsqlDataSource(conn, b => b.EnableDynamicJson());
 
 var app = builder.Build();
+
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path;
+    bool protectedPath = path.StartsWithSegments("/characters") || path.StartsWithSegments("/voyage");
+    if (protectedPath && !HasValidGatewayKey(context.Request.Headers, gatewayKey))
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        return;
+    }
+    await next();
+});
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", proto = ProtocolVersion.Current }));
 
@@ -203,6 +225,19 @@ static async Task ReclaimExpiredTicketAsync(NpgsqlDataSource db, Guid characterI
         """);
     cmd.Parameters.AddWithValue(characterId);
     await cmd.ExecuteNonQueryAsync();
+}
+
+// Fixed-time comparison so the shared secret can't be recovered by timing the
+// character/voyage endpoints one byte at a time.
+static bool HasValidGatewayKey(IHeaderDictionary headers, string expectedKey)
+{
+    if (!headers.TryGetValue("X-Ashfall-Key", out var provided) || provided.Count != 1)
+        return false;
+
+    var expectedBytes = Encoding.UTF8.GetBytes(expectedKey);
+    var providedBytes = Encoding.UTF8.GetBytes(provided[0] ?? "");
+    return expectedBytes.Length == providedBytes.Length
+        && CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
 }
 
 record WorldEntry(string Id, string Host, int Port);

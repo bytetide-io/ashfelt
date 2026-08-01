@@ -3,6 +3,22 @@
 Base URL in dev: `http://localhost:5041` (see `Properties/launchSettings.json`).
 Requires `ASHFALL_DB` (Postgres connection string) for character storage.
 
+## Authentication
+
+`/characters/*` and `/voyage*` are world-server-only — the client never reads
+or writes character state directly (invariant #3). Every request to those
+paths must carry:
+
+```
+X-Ashfall-Key: <ASHFALL_GATEWAY_KEY>
+```
+
+Defaults to `ashfall` on both sides for local dev, same convention as the
+world-server's `ASHFALL_CONNECT_KEY`; **override it in any shared or
+production deployment**. A missing or wrong key gets `401 Unauthorized`.
+`/health` and `/worlds` are unauthenticated — `/worlds` is the public
+destination list the client's travel menu reads directly.
+
 ## GET /health
 
 Liveness plus the protocol version the gateway was built against.

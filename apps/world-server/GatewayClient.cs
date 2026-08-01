@@ -13,9 +13,16 @@ public sealed class GatewayClient
 {
     private readonly HttpClient _http;
 
-    public GatewayClient(string baseUrl)
+    /// <param name="baseUrl">The gateway's base URL.</param>
+    /// <param name="key">
+    /// Shared secret proving this caller is a trusted world-server, not the
+    /// client — the gateway rejects /characters and /voyage* requests without
+    /// it. Must match the gateway's ASHFALL_GATEWAY_KEY.
+    /// </param>
+    public GatewayClient(string baseUrl, string key)
     {
         _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        _http.DefaultRequestHeaders.Add("X-Ashfall-Key", key);
     }
 
     /// <summary>
