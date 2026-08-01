@@ -31,6 +31,10 @@ public partial class PlayerBody : CharacterBody3D
     /// <summary>Facing in radians, reported to the server for remote rendering.</summary>
     public float Facing => _visual?.Rotation.Y ?? 0f;
 
+    /// <summary>Swing the body on a harvest strike. The driver (World3D) fires
+    /// this alongside the chop request so the animation and the request are one.</summary>
+    public void Gather() => _visual.PlayGather();
+
     /// <summary>Hard reset of position — used for server corrections and spawn.</summary>
     public void Teleport(Vector3 position)
     {
@@ -39,12 +43,12 @@ public partial class PlayerBody : CharacterBody3D
     }
 
     private Node3D _cameraPivot = null!;
-    private Node3D _visual = null!;
+    private CharacterRig _visual = null!;
 
     public override void _Ready()
     {
         _cameraPivot = GetNode<Node3D>("../CameraRig");
-        _visual = GetNode<Node3D>("Visual");
+        _visual = GetNode<CharacterRig>("Visual");
     }
 
     public override void _PhysicsProcess(double delta)
@@ -93,5 +97,8 @@ public partial class PlayerBody : CharacterBody3D
 
         Velocity = velocity;
         MoveAndSlide();
+
+        float planarSpeed = new Vector2(Velocity.X, Velocity.Z).Length();
+        _visual.SetLocomotion(planarSpeed, IsOnFloor());
     }
 }

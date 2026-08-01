@@ -1,124 +1,162 @@
-# Ashfall — architecture map (nightly-maintained)
+# Ashfall — architecture notes (nightly-maintained)
 
-Honest, living snapshot of the codebase for the overnight-engineer routine.
-Update this whenever a change is structural. Canonical design docs are
-`docs/architecture.md` and `docs/voyage-transfer.md`; this file is a map for
-finding your way around fast, plus a running list of debt.
+Honest, current-state map of the codebase for the overnight audit routine.
+Companion to `docs/architecture.md` (which owns the *decided* invariants) and
+`docs/gameplay-roadmap.md` (which owns *what to build*); this file owns
+*what's actually here right now*, kept current by each nightly session.
 
-Last updated: 2026-08-01 (first nightly pass — this file was created tonight;
-no prior nightly history exists).
-
-## Repo shape
+## Process map
 
 ```
-apps/client         Godot 4 mobile client, C#, net8.0
-apps/world-server    Headless authoritative UDP server, C#, net10.0 (console app, LiteNetLib)
-apps/gateway          Auth + character persistence + voyage coordination, C#, net10.0 (Postgres)
-packages/sim-core     Shared deterministic sim: terrain, harvest/craft/placement/survival
-                       rules, movement bounds, day/night clock, item catalog. net8.0.
-packages/shared-proto  Wire message ids/layouts (Protocol.cs), Character.cs DTO. net8.0.
-tests/sim-core.tests   Only test project in the repo — determinism + rule tests.
-infra/migrations       Plain numbered .sql files, applied in order, no migration runner.
-infra/docker           docker-compose for Postgres + world-server local dev.
+apps/client       Godot 4 mobile client, C#, net8.0 — third-person 3D, low-res
+                   pixel-art render, touch UI. Connects to one world-server
+                   over UDP (LiteNetLib).
+apps/world-server Headless, single-threaded authoritative server, net10.0.
+                   One process = one bounded region ("continent-a", …).
+                   Owns world state (terrain diffs, structures) + in-memory
+                   per-connection Player state (position, inventory, survival
+                   meters) for the duration of a session.
+apps/gateway      ASP.NET Core minimal API, net10.0. Owns *character* state
+                   (inventory + survival meters) in Postgres, keyed by a
+                   client-generated device UUID. Also brokers voyage handoff
+                   between world-servers (ticket mint/claim).
+packages/sim-core Shared deterministic simulation: terrain generation, tile
+                   rules, harvest/craft/place/movement/survival rules, item
+                   catalog, world clock. Referenced by both client (net8.0)
+                   and world-server (net10.0) so prediction and authority can
+                   never disagree. This is the one place that must stay
+                   platform/RNG/wall-clock free (see determinism below).
+packages/shared-proto  Wire message ids (`MessageId`) and DTOs shared between
+                   client/world-server (UDP) and world-server/gateway (HTTP
+                   JSON) — `CharacterState`, `VoyageGrant`, etc.
+infra/docker      docker-compose for local Postgres (+ a world-server image).
+infra/migrations  Hand-written, numbered SQL files, applied in order by being
+                   mounted into the postgres image's initdb.d. No migration
+                   *runner* — see Persistence notes below.
+tests/sim-core.tests  The only automated test project in the repo. Covers
+                   sim-core only: determinism, movement, crafting, placement,
+                   survival, terrain shape, item catalog, world clock.
 ```
 
-One CI workflow (`.github/workflows/ci.yml`): builds sim-core/shared-proto/
-world-server/gateway and runs `dotnet test tests/sim-core.tests`; a second job
-builds the client assemblies and does a headless Godot import. Nothing in CI
-runs world-server or gateway logic — those two apps have zero automated
-coverage beyond "does it compile."
+## Data flow, one player session
 
-## Data flow
+1. Client connects UDP to a world-server, sends `Hello` (protocol version,
+   device UUID, optional voyage ticket).
+2. World-server, synchronously (blocking its one packet/tick thread — see
+   Known debt): claims the character from the gateway
+   (`POST /characters/{id}/claim`, atomic ownership + load), replies
+   `Welcome` with spawn position, then backfills existing structures.
+3. Client requests chunks around itself; world-server regenerates each chunk
+   from `(seed, coord)` via `sim-core.TerrainGenerator`, layers any stored
+   diffs on top, and sends `ChunkData`.
+4. Client simulates its own movement/physics locally and reports position at
+   `ClientStateHz`; world-server checks each report against
+   `sim-core.MovementRules` (bounded by the height field + a speed budget)
+   and either accepts it or sends a `Correction`.
+5. Gather/craft/place/eat are all client *requests*; the world-server
+   re-derives the outcome from `sim-core` rules against its own authoritative
+   state and only then mutates + broadcasts. The client never dictates a
+   state change, only proposes one.
+6. On disconnect, the world-server fire-and-forgets a character save to the
+   gateway (in-memory state is already authoritative and snapshotted
+   synchronously before the async write, so this doesn't risk a torn read).
+7. A voyage (`RequestVoyage` → `RequestRelease`) has world-server A save the
+   character synchronously, mint a single-use ticket via the gateway, hand
+   the ticket to the client, and drop the entity; world-server B claims the
+   ticket on the client's `Hello` arrival. Character ownership
+   (`character.owner_world_id` in Postgres) is the single source of truth for
+   who may load a given character — see the July 24 log entry for why this
+   used to be unenforced on a plain join and is now claimed atomically
+   everywhere, including the non-voyage path.
 
-```
-client ──Hello(charId, voyage ticket)──▶ world-server ──REST──▶ gateway ──▶ Postgres
-client ◀──PlayerStates (15Hz, unreliable)── world-server
-client ──ClientState (position)──▶ world-server  (server validates against height field)
-client ──ChopRequest/CraftRequest/PlaceRequest/EatRequest──▶ world-server (authoritative)
-world-server ──tile_diff / structure rows──▶ Postgres (per-world DB, seed + diffs only)
-```
+## Determinism
 
-`apps/world-server/Program.cs` is a single top-level-statements file (468
-lines) holding: UDP listener setup, the Hello/voyage-claim handshake, all
-per-message-type handling (chop/craft/place/eat/release), and the 15 Hz tick
-loop (survival advance, position broadcast, dirty-inventory push, stats
-heartbeat). It is the de facto core of the server. Not yet a "god script" by
-line count but it is the one place that knows about every subsystem — watch
-this file's growth.
+`sim-core` rule tables (`ItemCatalog.All`, `HarvestRules.Nodes`,
+`CraftingRules.Recipes`) are already fixed-order static arrays with a
+lookup dictionary built once at type-load — not switches, contrary to what
+`docs/gameplay-roadmap.md` §3.1 currently implies is still missing. That
+foundation piece is largely done; what's still genuinely missing from the
+roadmap's §3 foundation list is the typed protocol read/write helpers
+(§3.2), the entity/actor system (§3.3), and the client decomposition (§3.4).
 
-`packages/shared-proto/Protocol.cs` defines `MessageId`, `ItemId` (wire-stable,
-append-only) and `Tuning` (tick rate 15 Hz, chop range 5 m, interest radius 1
-chunk, day length 600 s, stats heartbeat every 2 s). This is the single place
-network cadence and gameplay-adjacent constants are declared — good, matches
-the "no magic numbers" rule.
-
-## Client structure
-
-- `apps/client/scripts/world3d/World3D.cs` (735 lines) — the 3D world root:
-  wires terrain, camera, HUD, harvesting reticle, remote players, and the
-  SubViewport pixel-art pipeline together. Largest client script; a
-  refactor candidate once it grows further, not urgent yet.
-- `apps/client/scripts/world3d/SurvivalHud.cs` (940 lines) — the single
-  largest file in the repo. Builds every HUD element (meters, day/night chip,
-  crafting/build/items/travel menu tabs) procedurally in code rather than as
-  separate reusable scenes/components. This is the strongest "god script"
-  candidate in the codebase per the CLAUDE.md composition-over-inheritance
-  and small-reusable-scenes guidance.
-- `apps/client/scripts/WorldConnection.cs` (421 lines) — owns the UDP
-  connection, message encode/decode, and reconnect logic.
-- `apps/client/scripts/ui/DesignSystem.cs` / `PixelIcons.cs` — the Ink/Ember
-  design tokens and runtime-generated pixel icons; correctly centralised per
-  `docs/architecture.md`.
-
-## sim-core (the shared rules library)
-
-`TerrainGenerator`, `MovementRules`, `HarvestRules`, `CraftingRules`,
-`PlacementRules`, `SurvivalRules`, `WorldClock`, `ItemCatalog`, `Noise`,
-`World`, `TileType`. All under ~160 lines each — healthy size. `ItemCatalog`
-is the single source of item behaviour (stack size, food value, tool class,
-placeability); `HarvestRules`/`PlacementRules` are lookups over it rather than
-hand-listed switches, which is the intended pattern per the README. New
-content (items, recipes) should extend the catalog, not add parallel
-special-casing.
-
-Determinism is enforced by `Noise.Hash` (integer hashing) and covered by
-`tests/sim-core.tests/DeterminismTests.cs`, which is a compatibility contract
-— never "fix" a failing determinism test by updating its expected values.
+Terrain generation uses `Noise.Hash` (integer hashing), never platform RNG.
+Verified: no `Dictionary`/`HashSet` iteration in `sim-core` currently
+produces order-sensitive output — the tables above are arrays, and the
+`ConcurrentDictionary`s in `World.cs` (diffs, structures, harvest strikes)
+are only ever probed by key or iterated for existence checks / broadcasts,
+never for a value that depends on enumeration order.
 
 ## Persistence
 
-- World state: `tile_diff` (per-chunk tile overrides) + `structure` (placed
-  buildings), keyed by `world_id`, seed stored once on `world`. No full-chunk
-  persistence anywhere — matches invariant #2.
-- Character state: `character` table in the gateway DB (`infra/migrations/002_character.sql`),
-  inventory as JSONB keyed by stable `ItemId` enum names (survives wire
-  renumbering), survival meters as plain integers.
-- Voyage state: `infra/migrations/003_voyage.sql` — `owner_world_id` nullable
-  column + ticket table; NULL owner means in-transit, so a mid-transfer crash
-  can't duplicate a character. This is the correctness-critical persistence
-  path in the repo; see `docs/voyage-transfer.md`.
-- Migrations are plain sequential `.sql` files (001..004) with no version
-  table and no automated migration runner found in this pass — applying them
-  appears to be a manual/docker-compose-time step. No rollback path. Logged
-  to BACKLOG.
+- World state: `world`, `tile_diff`, `structure` tables. Seed + diffs only —
+  full chunks are never persisted (`packages/sim-core/World.cs`,
+  `apps/world-server/WorldStore.cs`).
+- Character state: `character` table (inventory JSONB + 4 survival meters +
+  `owner_world_id`), owned by the gateway. `infra/migrations/002..004` show
+  it's been extended twice already (voyage ownership, warmth) via
+  additive `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` with a `DEFAULT`, which
+  is a *de facto* migration convention even though there's no formal
+  versioned-migration runner — anyone changing this schema should keep
+  following that additive/defaulted pattern so old rows stay valid.
+- No explicit schema version field anywhere. Given migrations are just
+  numbered files applied once at container init (not replayed against a live
+  DB), a second migration runner (Flyway/DbUp/etc.) would be needed before
+  this can survive a real production deploy with existing data — flagged to
+  `BACKLOG.md`, not urgent pre-alpha.
 
-## Known debt (see BACKLOG.md for scored detail)
+## Authentication (added 2026-08-01)
 
-The 2026-08-01 audit confirmed the suspicions above and found one thing this
-map missed: the gateway's `/characters` and `/voyage*` endpoints had **no
-authentication at all** (score 20/25 — highest of the audit) — fixed the same
-night, see `LOG.md`. Remaining, ranked in `BACKLOG.md`:
+The gateway's `/characters/*` and `/voyage*` endpoints (including the
+`POST /characters/{id}/claim` endpoint above) now require an `X-Ashfall-Key`
+header matching `ASHFALL_GATEWAY_KEY` on both the gateway and world-server —
+see `apps/gateway/API.md`. Before this, the ownership-claim fix below made
+ownership *exclusive* but never checked *who* was allowed to claim, read or
+overwrite a character at all; any caller reaching the gateway's HTTP port
+could act as a trusted world-server. `/health` and `/worlds` stay open — the
+client reads `/worlds` directly for its travel menu, so it can't hold the
+server-to-server secret. Defaults to `"ashfall"` on both sides for local dev,
+same convention as the world-server's `ASHFALL_CONNECT_KEY`; **must** be
+overridden with a real secret (matching on both processes) in any shared or
+production deployment.
 
-- Interest management (invariant #6) is declared in `Tuning` but not actually
-  implemented — every broadcast goes to every client regardless of distance.
-- The gateway handshake blocks the world-server's single-threaded tick loop
-  (`.GetAwaiter().GetResult()` on join/release) — stalls every player in the
-  world while one player's HTTP round-trip is in flight.
-- `SurvivalHud.cs` (940 lines) and `World3D.cs` (735 lines) are god-scripts;
-  both were already flagged smaller in `docs/gameplay-roadmap.md` and have
-  grown past that call without the decomposition it asked for.
-- World-server and gateway have no automated tests; only sim-core does.
-- Migrations have no version tracking / rollback runner.
+## Known debt (see `BACKLOG.md` for scored, actionable entries)
 
-See `BACKLOG.md` for the full scored list and `LOG.md` for what was actually
-acted on each night.
+- **World-server is single-threaded and blocks on gateway HTTP calls** inside
+  the packet-receive handler (`Hello`, `RequestRelease`) via
+  `.GetAwaiter().GetResult()`. A slow or unreachable gateway stalls
+  *every* connected player's movement/harvest/tick processing for the
+  duration of the call, on every join and every voyage. Scored in
+  `BACKLOG.md`; not fixed tonight because it needs a real architecture
+  change (a pending-join queue drained from the tick loop) — bigger blast
+  radius to get wrong for less certain gain than the ownership bug, which is
+  a five-minute-round-trip data bug that's already exploitable today.
+- **`World3D.cs` (735 lines) and `SurvivalHud.cs` (940 lines)** are god
+  scripts mixing net dispatch, terrain streaming, foliage generation,
+  touch-input, harvest targeting, and (for the HUD) a full tabbed
+  inventory/craft/build UI with no reusable widget. Matches
+  `docs/gameplay-roadmap.md` §3.4, and has grown since that doc was written,
+  not shrunk.
+- **`WorldConnection.cs`'s `OnReceive`** is a 12-case hand-decoded switch on
+  `MessageId` with no compile-time check that field order matches the
+  server's writer — a reordering on either side is a silent wire bug.
+- **`World3D.UpdateGatherPrompt`** runs a 7×7-tile noise-heavy scan every
+  physics tick unconditionally (even while the action sheet is open), which
+  matters on mobile battery/thermal even though it isn't a correctness bug.
+
+## Target frameworks (unchanged, restated for quick reference)
+
+`sim-core`, `shared-proto`, `client` → net8.0. `world-server`, `gateway` →
+net10.0. This is intentional (net10 referencing net8 libs works); don't
+"fix" it.
+
+## Build/test environment caveat
+
+This session had **no working `dotnet` SDK** (not installed, and the
+network policy blocks `builds.dotnet.microsoft.com` needed to install one)
+and **no Docker daemon** (docker CLI present, socket absent) — so nothing
+in this repo could be compiled, run, or tested tonight. All review and all
+changes were done by careful manual reading, cross-referencing existing
+working code paths for idiom/pattern, and balance-checking braces/parens.
+A human must run `dotnet build` and `dotnet test tests/sim-core.tests`
+before trusting tonight's diff. See `LOG.md` for exactly what is and isn't
+verified.

@@ -87,6 +87,27 @@ public partial class SurvivalHud : Control
     public event System.Action? JumpPressed;
     public event System.Action<ItemId>? PlaceRequested;
 
+    /// <summary>Architect (blueprint design) intents. Every one is a request the
+    /// world or server may still refuse — the HUD only raises them.</summary>
+    public event System.Action? ArchitectToggled;
+    public event System.Action<BuildPieceKind>? ArchitectSelectKind;
+    public event System.Action<BuildMaterial>? ArchitectSelectMaterial;
+    public event System.Action? ArchitectUndo;
+    public event System.Action? ArchitectCommit;
+    public event System.Action? ArchitectExit;
+
+    /// <summary>Buildground intents raised when the player stands at an owned site.</summary>
+    public event System.Action? BuildHerePressed;
+    public event System.Action? DepositPressed;
+
+    private Button _architectToggle = null!;
+    private PanelContainer _architectBar = null!;
+    private readonly Dictionary<BuildPieceKind, Button> _pieceButtons = new();
+    private HBoxContainer _materialRow = null!;
+    private Label _architectBom = null!;
+    private Button _architectCommit = null!;
+    private PanelContainer _siteActions = null!;
+
     /// <summary>One survival meter: an icon-labelled striped bar plus a live numeral.</summary>
     private sealed class Meter
     {
@@ -120,8 +141,159 @@ public partial class SurvivalHud : Control
         BuildHotbar();
         BuildGatherPrompt();
         BuildTouchControls();
+        BuildArchitectBar();
+        BuildSiteActions();
         RefreshActionAvailability();
     }
+
+    // ---- Architect mode (blueprint design) ----------------------------
+
+    /// <summary>
+    /// The design palette that replaces the hotbar while planning: a row of piece
+    /// buttons, the materials the chosen piece supports, undo/commit/exit, and a
+    /// live bill of materials so the player knows the cost before hauling it.
+    /// </summary>
+    private void BuildArchitectBar()
+    {
+        _architectBar = new PanelContainer { Visible = false };
+        _architectBar.AddThemeStyleboxOverride("panel", DesignSystem.Panel(new Color(DesignSystem.Ink900, 0.9f), 12));
+        _architectBar.SetAnchorsPreset(LayoutPreset.CenterBottom);
+        _architectBar.GrowHorizontal = GrowDirection.Both;
+        _architectBar.GrowVertical = GrowDirection.Begin;
+        _architectBar.OffsetBottom = -DesignSystem.Space;
+
+        var column = new VBoxContainer();
+        column.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
+        _architectBar.AddChild(column);
+
+        _architectBom = DesignSystem.Kicker("EMPTY PLAN — TAP TO PLACE", DesignSystem.LabelMuted, 9);
+        _architectBom.HorizontalAlignment = HorizontalAlignment.Center;
+        column.AddChild(_architectBom);
+
+        var palette = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ShrinkCenter };
+        palette.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
+        foreach (var kind in ArchitectController.PieceKinds)
+        {
+            var picked = kind;
+            var button = ArchitectButton(PieceLabel(kind), () => ArchitectSelectKind?.Invoke(picked));
+            _pieceButtons[kind] = button;
+            palette.AddChild(button);
+        }
+        column.AddChild(palette);
+
+        _materialRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ShrinkCenter };
+        _materialRow.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
+        column.AddChild(_materialRow);
+
+        var actions = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ShrinkCenter };
+        actions.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
+        actions.AddChild(ArchitectButton("UNDO", () => ArchitectUndo?.Invoke()));
+        _architectCommit = ArchitectButton("COMMIT", () => ArchitectCommit?.Invoke());
+        DesignSystem.StyleButton(_architectCommit, DesignSystem.EmberButton(), DesignSystem.EmberButtonPressed(), DesignSystem.OnEmber);
+        actions.AddChild(_architectCommit);
+        actions.AddChild(ArchitectButton("EXIT", () => ArchitectExit?.Invoke()));
+        column.AddChild(actions);
+
+        _hudLayer.AddChild(_architectBar);
+    }
+
+    private static Button ArchitectButton(string text, System.Action pressed)
+    {
+        var button = new Button { Text = text, CustomMinimumSize = new Vector2(56, 44) };
+        if (DesignSystem.Display is { } font) button.AddThemeFontOverride("font", font);
+        button.AddThemeFontSizeOverride("font_size", 10);
+        StylePaletteButton(button, selected: false);
+        button.Pressed += pressed;
+        return button;
+    }
+
+    private static void StylePaletteButton(Button button, bool selected) =>
+        DesignSystem.StyleButton(button, DesignSystem.Slot(selected), DesignSystem.Slot(selected: true),
+            selected ? DesignSystem.OnEmber : DesignSystem.Parchment);
+
+    /// <summary>Short palette labels for the piece kinds.</summary>
+    private static string PieceLabel(BuildPieceKind kind) => kind switch
+    {
+        BuildPieceKind.Foundation => "BASE",
+        BuildPieceKind.Wall => "WALL",
+        BuildPieceKind.Doorway => "DOOR",
+        BuildPieceKind.Window => "WINDOW",
+        BuildPieceKind.Pillar => "POST",
+        BuildPieceKind.Roof => "ROOF",
+        _ => kind.ToString().ToUpperInvariant(),
+    };
+
+    private static string MaterialLabel(BuildMaterial material) => material.ToString().ToUpperInvariant();
+
+    /// <summary>The buildground actions shown when the player stands at an owned site:
+    /// stock it from the pouch, or strike its next piece up.</summary>
+    private void BuildSiteActions()
+    {
+        _siteActions = new PanelContainer { Visible = false };
+        _siteActions.AddThemeStyleboxOverride("panel", DesignSystem.Panel(new Color(DesignSystem.Ink900, 0.85f), 10));
+        _siteActions.SetAnchorsPreset(LayoutPreset.CenterBottom);
+        _siteActions.GrowHorizontal = GrowDirection.Both;
+        _siteActions.GrowVertical = GrowDirection.Begin;
+        _siteActions.OffsetBottom = -(DesignSystem.Space + HotbarSlot + DesignSystem.Space);
+
+        var row = new HBoxContainer();
+        row.AddThemeConstantOverride("separation", DesignSystem.SpaceSm);
+        _siteActions.AddChild(row);
+
+        var deposit = ArchitectButton("DEPOSIT", () => DepositPressed?.Invoke());
+        deposit.CustomMinimumSize = new Vector2(96, 44);
+        row.AddChild(deposit);
+        var build = ArchitectButton("BUILD", () => BuildHerePressed?.Invoke());
+        build.CustomMinimumSize = new Vector2(96, 44);
+        DesignSystem.StyleButton(build, DesignSystem.EmberButton(), DesignSystem.EmberButtonPressed(), DesignSystem.OnEmber);
+        row.AddChild(build);
+
+        _hudLayer.AddChild(_siteActions);
+    }
+
+    /// <summary>Shows or hides the architect palette, and hides the hotbar and move
+    /// stick while designing so nothing competes with the plan or the free camera.</summary>
+    public void SetBuildMode(bool on)
+    {
+        _architectBar.Visible = on;
+        _hotbar.Visible = !on;
+        _joystick.Visible = !on;
+        if (on) { _gatherPrompt.Visible = false; _siteActions.Visible = false; }
+    }
+
+    /// <summary>Refreshes the palette from the current piece, material and plan cost:
+    /// the chosen piece lights up, its material chips are rebuilt, and the bill of
+    /// materials reads what the build will cost.</summary>
+    public void UpdateArchitect(BuildPieceKind kind, BuildMaterial material, IReadOnlyList<MaterialCost> bom, bool valid)
+    {
+        foreach (var (pieceKind, button) in _pieceButtons)
+            StylePaletteButton(button, pieceKind == kind);
+
+        foreach (var child in _materialRow.GetChildren()) child.QueueFree();
+        foreach (var choice in StructureCatalog.MaterialsFor(kind))
+        {
+            var picked = choice;
+            var chip = ArchitectButton(MaterialLabel(choice), () => ArchitectSelectMaterial?.Invoke(picked));
+            StylePaletteButton(chip, choice == material);
+            _materialRow.AddChild(chip);
+        }
+
+        if (bom.Count == 0)
+        {
+            _architectBom.Text = "EMPTY PLAN — TAP TO PLACE";
+        }
+        else
+        {
+            var parts = new List<string>();
+            foreach (var line in bom) parts.Add($"{ItemCatalog.Of(line.Item).Name} {line.Amount}");
+            _architectBom.Text = string.Join("   ", parts);
+        }
+        _architectBom.AddThemeColorOverride("font_color", valid ? DesignSystem.LabelMuted : DesignSystem.Health);
+        _architectCommit.Disabled = bom.Count == 0 || !valid;
+    }
+
+    /// <summary>Shows the buildground actions, unless the player is mid-design.</summary>
+    public void ShowSiteActions(bool show) => _siteActions.Visible = show && !_architectBar.Visible;
 
     public void Bind(WorldConnection connection)
     {
@@ -234,6 +406,18 @@ public partial class SurvivalHud : Control
             DesignSystem.Round(), DesignSystem.Round(), DesignSystem.Parchment);
         _toggle.Toggled += OnToggleActions;
         column.AddChild(_toggle);
+
+        _architectToggle = new Button
+        {
+            Text = "⌂",
+            CustomMinimumSize = new Vector2(DesignSystem.RoundButton, DesignSystem.RoundButton),
+            SizeFlagsHorizontal = SizeFlags.ShrinkEnd,
+        };
+        _architectToggle.AddThemeFontSizeOverride("font_size", 26);
+        DesignSystem.StyleButton(_architectToggle,
+            DesignSystem.Round(), DesignSystem.Round(), DesignSystem.Parchment);
+        _architectToggle.Pressed += () => ArchitectToggled?.Invoke();
+        column.AddChild(_architectToggle);
     }
 
     // ---- Quick-use hotbar (bottom-centre) -----------------------------
