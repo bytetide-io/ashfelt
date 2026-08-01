@@ -105,10 +105,76 @@ suspect the codebase has moved since.
   exercises the claim/voyage/save endpoints directly, including the
   concurrent-claim race this fix targets.
 
+## From 2026-08-01 audit
+
+### Multiplayer correctness / security
+
+- **[FIXED 2026-08-01]** ~~No authentication at all on `/characters/*` or
+  `/voyage*` — any caller who could reach the gateway's HTTP port could
+  claim, read or overwrite any character, or mint/claim voyage tickets for a
+  character they don't own~~ — see `LOG.md`. Independent of, and composes
+  with, the 2026-07-24 ownership-exclusivity fix above (that fix stops two
+  world-servers holding one character at once; this fix stops an
+  unauthenticated caller from acting as a world-server in the first place).
+
+- **Interest management (invariant #6) is unimplemented.** `Tuning.InterestRadiusChunks`
+  is declared in `packages/shared-proto/Protocol.cs` but never read anywhere.
+  `PlayerStates`, `TileChanged`, `HarvestProgress` and `StructurePlaced` all
+  broadcast to every connected client regardless of distance
+  (`apps/world-server/Program.cs`). Not scored as multiplayer-*correctness*
+  (nothing behaves wrong) but as bandwidth/scale debt — fine at today's
+  player counts, a real cost once a world has more than a handful of
+  concurrent players. Severity 3 × Blast radius 3 = **9**.
+
+### Data integrity
+
+- **Fire-and-forget world-state DB writes swallow failures silently.** The
+  tile-diff and structure persistence calls in `apps/world-server/Program.cs`
+  (around the chop/place handlers) have no try/catch or log, unlike the
+  character-save fire-and-forget right next to them in the same file, which
+  does log on failure. A failed diff/structure write today is invisible —
+  the in-memory world state stays correct until restart, then the write
+  silently never happened. Severity 3 × Blast radius 3 = **9**. Fix: wrap
+  both in the same try/catch-and-log pattern already used for character
+  saves.
+
+### Architecture / maintainability
+
+- **`PlacementRules.Blocks` bypasses `ItemCatalog`** (`packages/sim-core/PlacementRules.cs`),
+  the single-source-of-truth pattern the rest of the file and
+  `HarvestRules`/`CraftingRules` already follow. Severity 1 × Blast radius 3
+  = **3**. Fix: move the blocking-tile data into `ItemCatalog`/`StructureCatalog`
+  alongside the other per-item/per-structure data.
+
+- **`RequestChunk`/`ChunkData` is dead protocol.** The client never streams
+  chunks over the wire — it builds a fixed local radius client-side instead
+  (`apps/client/scripts/WorldConnection.cs`, `apps/world-server/Program.cs`).
+  Either wire it up for real streaming (needed eventually for worlds bigger
+  than the fixed local radius) or remove the dead message types. Severity 2
+  × Blast radius 3 = **6**.
+
+- **`World.HasWarmthNear` is an unindexed linear scan** of every structure in
+  the world, called once per player per tick (15 Hz)
+  (`packages/sim-core/World.cs`, called from `apps/world-server/Program.cs`).
+  Fine at current structure counts; will need a spatial index (grid bucket by
+  chunk, same as tile diffs) once worlds accumulate more building. Severity 2
+  × Blast radius 3 = **6**.
+
+- **`DebugCapture.cs` still calls `GetCamera2D()`** in the now-3D client —
+  capture framing options silently no-op since the client's move to 3D.
+  Severity 1 × Blast radius 2 = **2**.
+
+Note: this session's own audit independently re-found the blocking-gateway-
+HTTP-calls issue (20, above) and the `SurvivalHud`/`World3D` god-script sizes
+(9 each, above) already tracked from 2026-07-24 — not re-listed with a
+second score, since nothing about them changed.
+
 ## Rejected feature ideas (logged per Phase-2 discipline, not built — audit
 found a fix-tonight-caliber bug first, so Phase 2 wasn't reached)
 
-None yet — Phase 2 (new feature) was skipped tonight because the audit
-surfaced a multiplayer-correctness finding scoring 20 (over the 15 threshold,
-and over the 9 threshold on the multiplayer-correctness track), which the
-routine's decision rule requires fixing instead of building new content.
+None from 2026-07-24 — Phase 2 (new feature) was skipped that night because
+the audit surfaced a multiplayer-correctness finding scoring 20 (over the 15
+threshold, and over the 9 threshold on the multiplayer-correctness track),
+which the routine's decision rule requires fixing instead of building new
+content. Same outcome 2026-08-01, same reason, different finding (see
+above) — Phase 2 has not been reached in either session run so far.

@@ -104,6 +104,21 @@ never for a value that depends on enumeration order.
   this can survive a real production deploy with existing data — flagged to
   `BACKLOG.md`, not urgent pre-alpha.
 
+## Authentication (added 2026-08-01)
+
+The gateway's `/characters/*` and `/voyage*` endpoints (including the
+`POST /characters/{id}/claim` endpoint above) now require an `X-Ashfall-Key`
+header matching `ASHFALL_GATEWAY_KEY` on both the gateway and world-server —
+see `apps/gateway/API.md`. Before this, the ownership-claim fix below made
+ownership *exclusive* but never checked *who* was allowed to claim, read or
+overwrite a character at all; any caller reaching the gateway's HTTP port
+could act as a trusted world-server. `/health` and `/worlds` stay open — the
+client reads `/worlds` directly for its travel menu, so it can't hold the
+server-to-server secret. Defaults to `"ashfall"` on both sides for local dev,
+same convention as the world-server's `ASHFALL_CONNECT_KEY`; **must** be
+overridden with a real secret (matching on both processes) in any shared or
+production deployment.
+
 ## Known debt (see `BACKLOG.md` for scored, actionable entries)
 
 - **World-server is single-threaded and blocks on gateway HTTP calls** inside

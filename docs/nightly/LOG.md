@@ -5,6 +5,127 @@ session — see the routine's prompt for the required shape.
 
 ---
 
+## 2026-08-01 — AUDIT + FIX
+
+**Chose:** Added shared-secret authentication (`X-Ashfall-Key`, env
+`ASHFALL_GATEWAY_KEY`, fixed-time compared) to the gateway's `/characters/*`
+and `/voyage*` endpoints — including the `POST /characters/{id}/claim`
+endpoint the 2026-07-24 session introduced. `/health` and `/worlds` stay
+open; the client's travel menu reads `/worlds` directly.
+
+**Because:** this session's own audit (before discovering the 2026-07-24
+history — see below) independently found that the gateway's character and
+voyage endpoints had **no authentication at all**: anyone who could reach
+the gateway's HTTP port could call `POST /characters/{id}/claim`,
+`PUT /characters/{id}`, `POST /voyage`, or `POST /voyage/claim` for *any*
+character UUID, with nothing checking the caller was a trusted world-server.
+Scored Severity 5 × Blast radius 4 = 20, above the fix-tonight threshold.
+This is a distinct hole from the one the 2026-07-24 session closed: that fix
+made ownership *exclusive* (only one world-server can hold a character at a
+time) but never checked *who* was allowed to call the ownership-claiming
+endpoint in the first place — an unauthenticated attacker could still claim,
+read, or overwrite any character directly, ticket or no ticket. Confirmed
+this was still open by reading current `main`'s `apps/gateway/Program.cs`
+before writing the fix, so the finding is current, not stale.
+
+This session started from an older base of the repo (before the blueprint-
+building system and the 2026-07-24 fix existed on this branch) and only
+discovered the existing `docs/nightly/` history — including that a nightly
+session had already run and this exact area of code had already changed
+underneath it — while merging `main` into its branch after opening its PR.
+Per "never repeat or undo a previous night's work without explicit
+justification": this session's fix does not undo the 2026-07-24 fix, it
+composes with it (both are now in effect — ownership is exclusive *and* only
+trusted world-servers can claim/save/voyage at all), so no conflict to
+justify.
+
+**Changed:**
+- `apps/gateway/Program.cs` — auth middleware gating `/characters*` and
+  `/voyage*` (covers the claim endpoint too) on a fixed-time-compared shared
+  secret; `/health`/`/worlds` unauthenticated by design.
+- `apps/world-server/GatewayClient.cs` — constructor now takes the key and
+  sends it as `X-Ashfall-Key` on every request (including `ClaimCharacterAsync`).
+- `apps/world-server/Program.cs` — reads `ASHFALL_GATEWAY_KEY` (default
+  `ashfall`, same convention as the existing `ASHFALL_CONNECT_KEY`) and
+  passes it to `GatewayClient`.
+- `apps/gateway/API.md` — documents the new required header.
+- `docs/nightly/{LOG,BACKLOG,ARCH}.md` — this entry, and a new
+  "2026-08-01 audit" section in `BACKLOG.md`. `ARCH.md`'s existing content
+  (from 2026-07-24, which is more current than this session's own
+  independently-drafted map) was kept rather than overwritten.
+
+**Risk:** Both sides default the key to `"ashfall"` for local dev, matching
+the existing `ASHFALL_CONNECT_KEY` pattern — a fresh `docker compose up` /
+`dotnet run` setup keeps working unmodified. Anyone running the gateway and
+world-server in a shared or production environment **must** set
+`ASHFALL_GATEWAY_KEY` to a real secret on both processes (matching values)
+or the default is a known, public secret and provides no protection. If the
+two processes' keys ever drift, every character load/save and every voyage
+starts returning 401 — loud and immediate, not silent corruption, but it
+will look like an outage; watch world-server logs for
+`EnsureSuccessStatusCode` exceptions from `GatewayClient`.
+
+**Verified:** Read every touched file back after editing and traced control
+flow by hand: the middleware runs before route mapping and checks
+`Path.StartsWithSegments`, matching this file's existing minimal-API style;
+grepped the whole repo for other `GatewayClient` constructions or direct
+callers of `/characters`/`/voyage*` and found only the one call site, now
+updated. After merging `main`, re-read the auto-merged
+`apps/gateway/Program.cs`, `GatewayClient.cs`, and `apps/world-server/Program.cs`
+in full to confirm the 3-way merge composed correctly with the
+`POST /characters/{id}/claim` endpoint and the same-process duplicate-connection
+guard the 2026-07-24 session added — it does; the auth middleware wraps the
+claim endpoint (same `/characters` path prefix) without needing any change
+to that logic.
+
+**Not verified:** **Could not build or run anything** — no `dotnet` SDK in
+this session's sandbox (same limitation the 2026-07-24 session hit). Could
+not run `dotnet build`, `dotnet test tests/sim-core.tests`, start the
+gateway/world-server for an end-to-end `Hello` → claim round trip, or open
+the Godot client. This change touches only server-to-server C# request
+plumbing — sim-core, client scripts, and the wire protocol are untouched —
+so no determinism test should be affected, but a human or CI must confirm
+`dotnet build apps/gateway` and `dotnet build apps/world-server` actually
+compile. **CI on the PR is the first real verification this gets** —
+watching it and will fix anything it flags.
+
+**Rejected tonight:**
+- Requiring `ASHFALL_GATEWAY_KEY` with no default (fail loudly like
+  `ASHFALL_DB`) — would break the README's local dev flow for a security
+  property already no worse than the existing `ASHFALL_CONNECT_KEY` default;
+  consistency with that convention won.
+- Protecting `/worlds` behind the same key — the client calls `GET /worlds`
+  directly for the travel menu, so it can't hold the server-to-server
+  secret.
+- Rewriting `ARCH.md`'s process map from scratch against this session's own
+  (older, now-superseded) reading of the codebase — the existing entry from
+  2026-07-24 is more current and accurate than a fresh one drafted before
+  this session discovered the blueprint-building work and the prior fix
+  already on `main`; overwriting it would have been a regression in the
+  document's own accuracy, not an improvement.
+
+**Added to backlog:** New section in `BACKLOG.md` for tonight's audit —
+interest management (invariant #6) declared in `Tuning` but never actually
+implemented (broadcasts go to every client regardless of distance); several
+fire-and-forget world-server DB writes (tile diffs, structures) swallow
+failures silently, unlike the character-save path right next to them which
+logs on failure; `PlacementRules.Blocks` bypasses the `ItemCatalog`
+single-source-of-truth pattern used everywhere else in that file; the
+`RequestChunk`/`ChunkData` protocol path is dead code the client never
+exercises; `World.HasWarmthNear` is an unindexed per-player, per-tick linear
+scan over every structure. The blocking-gateway-calls finding (20) and the
+`SurvivalHud`/`World3D` god-script findings (9 each) already in `BACKLOG.md`
+from 2026-07-24 were independently re-derived by this session's own audit —
+left as-is rather than duplicated with a second score.
+
+**Question for the human:** None blocking — but please confirm CI is green
+on the PR before merging, since this session couldn't build locally, and
+please double check nothing about tonight's branch-start being stale
+(working from an older base than current `main`, discovered only mid-session)
+caused anything to be missed beyond what's noted above.
+
+---
+
 ## 2026-07-24 — AUDIT-ONLY (fix, not feature)
 
 **Chose:** Closed a character-duplication hole: the world-server's normal
