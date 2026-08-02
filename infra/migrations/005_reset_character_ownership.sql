@@ -1,0 +1,11 @@
+-- One-time data fix accompanying the character-ownership bugfix (see world-server
+-- Program.cs / gateway Program.cs of this commit).
+--
+-- owner_world_id has existed since 003_voyage.sql but was only ever written by
+-- the voyage-claim path; a normal join/leave never checked or cleared it. Any
+-- character that voyaged before this fix and later left normally (rather than
+-- voyaging again) is left with a stale owner_world_id pointing at a world that
+-- no longer holds it — under the newly-enforced claim check that character
+-- would wrongly be refused a join everywhere else. Clear it once; every join
+-- from here on claims and releases ownership correctly on its own.
+UPDATE character SET owner_world_id = NULL WHERE owner_world_id IS NOT NULL;

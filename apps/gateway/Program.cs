@@ -41,9 +41,23 @@ app.MapGet("/worlds", () => Results.Ok(worlds.Values));
 // ticket self-heals — ownership returns to the world the character left.
 const int TicketTtlSeconds = 60;
 
-// Character load: returns the stored inventory + survival meters, or 404 when
-// the device UUID has never saved a character.
-app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
+// Character load: atomically claims ownership for the requesting world-server
+// and returns the stored inventory + survival meters.
+//
+// A character is owned by exactly one world-server at a time (see
+// docs/voyage-transfer.md) — that invariant used to be enforced only for
+// voyage handoffs; a normal join never checked or set owner_world_id at all,
+// so the same character could be loaded into two world-servers concurrently
+// (a fast mobile reconnect racing its own pending save, or any second session
+// started before the first one's leave-save landed), silently losing or
+// duplicating inventory. The UPDATE below is the fix: it hands out state only
+// when nobody else currently owns the character.
+//
+// - 200 — claimed (or already owned by this world) and loaded.
+// - 404 — no character stored for this UUID yet; caller starts fresh.
+// - 409 — owned by a different world-server right now; caller must refuse
+//   the join rather than hand the client a stale or divergent copy.
+app.MapGet("/characters/{id:guid}", async (Guid id, string worldId, NpgsqlDataSource db) =>
 {
     // Self-heal a stranded voyage: if this character has a ticket that expired
     // unclaimed, ownership returns to the world it left before we hand the state
@@ -51,36 +65,59 @@ app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
     // the player simply reconnects and is loaded as if the voyage never began.
     await ReclaimExpiredTicketAsync(db, id);
 
-    await using var cmd = db.CreateCommand(
-        "SELECT inventory, hunger, stamina, health, warmth FROM character WHERE id = $1");
-    cmd.Parameters.AddWithValue(id);
+    await using var claim = db.CreateCommand("""
+        UPDATE character SET owner_world_id = $2
+        WHERE id = $1 AND (owner_world_id IS NULL OR owner_world_id = $2)
+        RETURNING inventory, hunger, stamina, health, warmth
+        """);
+    claim.Parameters.AddWithValue(id);
+    claim.Parameters.AddWithValue(worldId);
 
-    await using var reader = await cmd.ExecuteReaderAsync();
-    if (!await reader.ReadAsync()) return Results.NotFound();
-
-    var character = new CharacterState
+    await using (var reader = await claim.ExecuteReaderAsync())
     {
-        Inventory = reader.GetFieldValue<Dictionary<string, int>>(0),
-        Hunger = reader.GetInt32(1),
-        Stamina = reader.GetInt32(2),
-        Health = reader.GetInt32(3),
-        Warmth = reader.GetInt32(4),
-    };
-    return Results.Ok(character);
+        if (await reader.ReadAsync())
+        {
+            var character = new CharacterState
+            {
+                Inventory = reader.GetFieldValue<Dictionary<string, int>>(0),
+                Hunger = reader.GetInt32(1),
+                Stamina = reader.GetInt32(2),
+                Health = reader.GetInt32(3),
+                Warmth = reader.GetInt32(4),
+            };
+            return Results.Ok(character);
+        }
+    }
+
+    // The claim matched no row: either this UUID has never been saved (fresh
+    // character — 404, start empty) or it exists but a different world-server
+    // owns it right now (409 — deny the join).
+    await using var check = db.CreateCommand("SELECT owner_world_id FROM character WHERE id = $1");
+    check.Parameters.AddWithValue(id);
+    var owner = await check.ExecuteScalarAsync();
+    return owner is null
+        ? Results.NotFound()
+        : Results.Conflict(new { error = $"character '{id}' is owned by world '{owner}'" });
 });
 
-// Character save: upsert the character, creating the row on first save.
+// Character save: upsert the character, creating the row on first save. This
+// is always a *leave* (normal disconnect, or the save-then-voyage handoff in
+// RequestRelease) — the caller no longer owns the character afterwards, so the
+// save also releases ownership. Without this, a character claimed by a past
+// voyage would stay locked to that world-server forever once it reconnected
+// somewhere else normally, since nothing else ever clears owner_world_id.
 app.MapPut("/characters/{id:guid}", async (Guid id, CharacterState character, NpgsqlDataSource db) =>
 {
     await using var cmd = db.CreateCommand("""
-        INSERT INTO character (id, inventory, hunger, stamina, health, warmth, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, now())
+        INSERT INTO character (id, inventory, hunger, stamina, health, warmth, owner_world_id, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NULL, now())
         ON CONFLICT (id) DO UPDATE SET
             inventory = EXCLUDED.inventory,
             hunger = EXCLUDED.hunger,
             stamina = EXCLUDED.stamina,
             health = EXCLUDED.health,
             warmth = EXCLUDED.warmth,
+            owner_world_id = NULL,
             updated_at = now()
         """);
     cmd.Parameters.AddWithValue(id);

@@ -23,6 +23,13 @@ var writer = new NetDataWriter();
 int nextPlayerId = 1;
 long tick = 0;
 
+// A leave's character save runs fire-and-forget (see PeerDisconnectedEvent) so
+// one slow write never stalls the players still in the world. That means a
+// reconnect arriving before the save lands could otherwise load the pre-leave
+// state and clobber it — this tracks the in-flight save per character so Hello
+// can wait for *that character's own* save, without blocking anyone else.
+var pendingSaves = new Dictionary<Guid, Task>();
+
 var listener = new EventBasedNetListener();
 var server = new NetManager(listener) { UpdateTime = 15 };
 
@@ -53,7 +60,7 @@ listener.PeerDisconnectedEvent += (peer, info) =>
     {
         var characterId = player.CharacterId;
         var snapshot = player.ToCharacterState();
-        _ = Task.Run(async () =>
+        pendingSaves[characterId] = Task.Run(async () =>
         {
             try { await gateway.SaveCharacterAsync(characterId, snapshot); }
             catch (Exception ex)
@@ -105,10 +112,23 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                 if (!claimed)
                 {
                     Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
+                    // Never loaded — clear the id so the disconnect below doesn't
+                    // save this session's untouched defaults over the real character.
+                    player.CharacterId = Guid.Empty;
                     peer.Disconnect();
                     break;
                 }
                 Console.WriteLine($"[world] claimed voyaging character {player.CharacterId}");
+            }
+
+            // A prior session for this same character may still have a leave-save
+            // in flight (fire-and-forget, see PeerDisconnectedEvent) — wait for it
+            // so this join never races its own not-yet-persisted state. This only
+            // blocks the reconnecting character, not the other players in the loop.
+            if (pendingSaves.TryGetValue(player.CharacterId, out var pending))
+            {
+                pending.GetAwaiter().GetResult();
+                pendingSaves.Remove(player.CharacterId);
             }
 
             // Load happens at Hello (not connect) because the UUID is only known
@@ -116,12 +136,28 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // wait, and seeding synchronously keeps the inventory the tick loop
             // reads free of cross-thread mutation. Saves, by contrast, are
             // fire-and-forget so a leaving player never stalls the others.
+            //
+            // The claim is atomic at the gateway (invariant: exactly one owner):
+            // a character already owned by a different, still-live world-server
+            // is refused here rather than loaded a second time.
             try
             {
-                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
-                if (character is not null) player.LoadCharacter(character);
+                var result = gateway.GetCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
+                if (result.Outcome == CharacterLoadOutcome.OwnedElsewhere)
+                {
+                    Console.WriteLine($"[world] rejecting join for {player.CharacterId}: owned by another world-server");
+                    // This character was never actually admitted — clear the id so
+                    // PeerDisconnectedEvent doesn't fire a save that would stomp the
+                    // real owner's state with this session's untouched defaults (and
+                    // wrongly release their claim).
+                    player.CharacterId = Guid.Empty;
+                    peer.Disconnect();
+                    break;
+                }
+
+                if (result.Outcome == CharacterLoadOutcome.Loaded) player.LoadCharacter(result.State!);
                 Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
-                                  (character is null ? "is new" : "loaded"));
+                                  (result.Outcome == CharacterLoadOutcome.New ? "is new" : "loaded"));
             }
             catch (Exception ex)
             {

@@ -19,15 +19,23 @@ public sealed class GatewayClient
     }
 
     /// <summary>
-    /// Fetches a character, or null when the gateway has none yet (a fresh
-    /// device UUID) — the caller then starts the player empty and full.
+    /// Claims and fetches a character for <paramref name="worldId"/>. The claim
+    /// is atomic at the gateway: it fails with <see cref="CharacterLoadOutcome.OwnedElsewhere"/>
+    /// when a different world-server currently owns the character, so the same
+    /// character can never be loaded (and independently mutated) by two
+    /// world-servers at once.
     /// </summary>
-    public async Task<CharacterState?> GetCharacterAsync(Guid id)
+    public async Task<CharacterLoadResult> GetCharacterAsync(Guid id, string worldId)
     {
-        var response = await _http.GetAsync($"/characters/{id}");
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        var response = await _http.GetAsync($"/characters/{id}?worldId={Uri.EscapeDataString(worldId)}");
+        if (response.StatusCode == HttpStatusCode.NotFound)
+            return new CharacterLoadResult(CharacterLoadOutcome.New, null);
+        if (response.StatusCode == HttpStatusCode.Conflict)
+            return new CharacterLoadResult(CharacterLoadOutcome.OwnedElsewhere, null);
+
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<CharacterState>();
+        var state = await response.Content.ReadFromJsonAsync<CharacterState>();
+        return new CharacterLoadResult(CharacterLoadOutcome.Loaded, state);
     }
 
     /// <summary>Upserts a character, creating it on first save.</summary>
@@ -71,3 +79,8 @@ public sealed record VoyageGrant
     public int TargetPort { get; init; }
     public Guid Ticket { get; init; }
 }
+
+public enum CharacterLoadOutcome { New, Loaded, OwnedElsewhere }
+
+/// <summary>Result of a character claim-and-load attempt. See <see cref="CharacterLoadOutcome"/>.</summary>
+public sealed record CharacterLoadResult(CharacterLoadOutcome Outcome, CharacterState? State);

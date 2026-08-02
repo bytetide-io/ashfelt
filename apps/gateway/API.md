@@ -21,12 +21,15 @@ Stub world registry (Phase 3 will make it live).
 [ { "id": "continent-a", "host": "127.0.0.1", "port": 9050 } ]
 ```
 
-## GET /characters/{id}
+## GET /characters/{id}?worldId={worldId}
 
-Load a character by its device UUID. Inventory is keyed by the stable `ItemId`
+Load a character by its device UUID, atomically claiming ownership for
+`worldId`. A character is owned by exactly one world-server at a time — this
+call is that claim, not just a read. Inventory is keyed by the stable `ItemId`
 enum name; the three meters are display points (0..100).
 
 - `id` — UUID (path).
+- `worldId` — the calling world-server's id (query, required).
 
 ```json
 200 OK
@@ -40,12 +43,13 @@ enum name; the three meters are display points (0..100).
 
 ```
 404 Not Found   — no character stored for this UUID yet (start fresh)
+409 Conflict    — owned by a different world-server right now; refuse the join
 ```
 
 ## PUT /characters/{id}
 
-Upsert a character, creating it on first save. Body is the same shape as the
-GET response.
+Upsert a character, creating it on first save, and release ownership (this is
+always a leave). Body is the same shape as the GET response.
 
 - `id` — UUID (path).
 
