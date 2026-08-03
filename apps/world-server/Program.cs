@@ -23,6 +23,15 @@ var writer = new NetDataWriter();
 int nextPlayerId = 1;
 long tick = 0;
 
+// A client is told about players within this radius, never every player in
+// the world — the interest-management invariant (docs/architecture.md #6).
+// PlayerStates was broadcasting unfiltered to everyone; InterestRadiusChunks
+// existed in Tuning but nothing read it. Bandwidth grew O(N) per player and
+// O(N^2) total with no distance cutoff, and would keep growing as a world
+// fills up.
+double interestRadiusMetres =
+    Tuning.InterestRadiusChunks * TerrainGenerator.ChunkSize * TerrainGenerator.TileMetres;
+
 var listener = new EventBasedNetListener();
 var server = new NetManager(listener) { UpdateTime = 15 };
 
@@ -391,19 +400,30 @@ while (!shutdown.IsSet)
 
     if (players.Count > 0)
     {
-        writer.Reset();
-        writer.Put((byte)MessageId.PlayerStates);
-        writer.Put((byte)players.Count);
-        foreach (var player in players.Values)
+        // Per-recipient snapshot: each player only hears about players within
+        // interest range of them, not the whole world's population.
+        var visible = new List<Player>();
+        foreach (var recipient in players.Values)
         {
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            writer.Put(player.Yaw);
+            visible.Clear();
+            foreach (var player in players.Values)
+                if (player.Position.HorizontalDistanceTo(recipient.Position) <= interestRadiusMetres)
+                    visible.Add(player);
+
+            writer.Reset();
+            writer.Put((byte)MessageId.PlayerStates);
+            writer.Put((byte)visible.Count);
+            foreach (var player in visible)
+            {
+                writer.Put(player.Id);
+                writer.Put((float)player.Position.X);
+                writer.Put((float)player.Position.Y);
+                writer.Put((float)player.Position.Z);
+                writer.Put(player.Yaw);
+            }
+            // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
+            recipient.Peer.Send(writer, DeliveryMethod.Unreliable);
         }
-        // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
-        Broadcast(writer, method: DeliveryMethod.Unreliable);
 
         foreach (var player in players.Values)
         {

@@ -16,13 +16,26 @@ public partial class RemotePlayers : Node3D
 
     public void Apply(IReadOnlyList<PlayerState> states, int localId)
     {
+        var seen = new HashSet<int>();
         foreach (var state in states)
         {
             if (state.Id == localId) continue;
+            seen.Add(state.Id);
             _targets[state.Id] = state.Position;
             _yaws[state.Id] = state.Yaw;
             if (!_bodies.ContainsKey(state.Id)) CallDeferred(nameof(Spawn), state.Id, state.Position);
         }
+
+        // The server now sends only players within interest range, so a body
+        // can legitimately vanish from a snapshot by walking out of range —
+        // not just by disconnecting. Prune anyone this snapshot no longer
+        // reports, the same way an explicit PlayerLeft would.
+        if (_bodies.Count == 0) return;
+        List<int>? stale = null;
+        foreach (var id in _bodies.Keys)
+            if (!seen.Contains(id)) (stale ??= new List<int>()).Add(id);
+        if (stale is not null)
+            foreach (var id in stale) Remove(id);
     }
 
     private void Spawn(int id, Vector3 at)
