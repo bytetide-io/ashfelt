@@ -64,11 +64,10 @@ retry/timeout on the client side for a chunk that never answers). This exact
 gap (no retry/timeout) already existed for other reliable messages in this
 codebase, so it's a consistent risk level, not a new one introduced tonight.
 
-**Revert:** `git revert <hash of "client: fetch server chunk diffs before
-building terrain" on branch claude/relaxed-pascal-bl1c9l>` — see that
-commit's SHA in `git log`. The change is fully self-contained to
-`World3D.cs`; reverting drops the client back to building from the pristine
-seed only (tonight's bug, not a new one).
+**Revert:** `git revert 0ac7014` (branch `claude/relaxed-pascal-bl1c9l`,
+"client: fetch server chunk diffs before building terrain"). The change is
+fully self-contained to `World3D.cs`; reverting drops the client back to
+building from the pristine seed only (tonight's bug, not a new one).
 
 **Verified:** Read every touched call site and type by hand — `ChunkCoord`,
 `TileType[]`, `WorldConnection.RequestChunk`/`ChunkReceived`,
