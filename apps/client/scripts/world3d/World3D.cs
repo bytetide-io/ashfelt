@@ -6,11 +6,14 @@ using Godot;
 namespace Ashfall.Client;
 
 /// <summary>
-/// Builds the visible world from the seed: terrain meshes, trees and water.
+/// Builds the visible world from the seed plus the server's chunk diffs:
+/// terrain meshes, trees and water.
 ///
-/// This is the 3D replacement for the tilemap client. It still follows the
-/// seed+diffs rule — nothing here is downloaded or stored, it is all derived
-/// from a seed the server will supply once networking is ported.
+/// This is the 3D replacement for the tilemap client. It follows the
+/// seed+diffs rule: on Welcome the client requests every chunk in the build
+/// radius and waits for all of them before generating foliage, so a tile the
+/// server already harvested is never regenerated as a pristine, choppable
+/// tree.
 /// </summary>
 public partial class World3D : Node3D
 {
@@ -43,8 +46,24 @@ public partial class World3D : Node3D
     /// <summary>Client-side tile diffs, mirroring the server's seed+diffs rule: a
     /// harvested tile reverts here too, so the gather reticle and tap both read the
     /// tile as it now is rather than the pristine generated terrain. Without this
-    /// the client keeps offering to gather an already-felled node.</summary>
+    /// the client keeps offering to gather an already-felled node. Seeded from the
+    /// server's chunk data on join/voyage, then kept current by live TileChanged
+    /// broadcasts.</summary>
     private readonly Dictionary<(int, int), TileType> _tileDiffs = new();
+
+    /// <summary>Chunk tile data fetched from the server for the current build
+    /// radius, keyed by chunk coord. Populated by <see cref="RequestChunks"/> and
+    /// consumed once every requested chunk has arrived.</summary>
+    private readonly Dictionary<ChunkCoord, TileType[]> _fetchedChunks = new();
+
+    /// <summary>Chunks requested but not yet answered. Building waits for this to
+    /// empty so foliage generation always sees the server's diffs, not just the
+    /// pristine seed.</summary>
+    private readonly HashSet<ChunkCoord> _pendingChunks = new();
+
+    /// <summary>Spawn position held between the chunk request and the build it
+    /// gates, so the player is placed only once the world actually exists.</summary>
+    private Vector3 _pendingSpawn;
 
     private TileType EffectiveTile(int x, int y) =>
         _tileDiffs.TryGetValue((x, y), out var tile) ? tile : _terrain.TileAt(x, y);
@@ -99,6 +118,7 @@ public partial class World3D : Node3D
         _connection.Corrected += (position, reason) =>
             CallDeferred(nameof(OnCorrected), position, (int)reason);
         _connection.PlayersUpdated += states => _remotes.Apply(states, _localId);
+        _connection.ChunkReceived += OnChunkReceived;
         _connection.PlayerLeft += id => CallDeferred(nameof(OnPlayerLeft), id);
         _connection.StatsUpdated += (_, _, _, _, timeOfDay) =>
             CallDeferred(nameof(SyncClock), timeOfDay);
@@ -145,9 +165,9 @@ public partial class World3D : Node3D
 
         _localId = playerId;
         Seed = seed;
-        Build();
-        _player.Teleport(spawn + Vector3.Up * 1.5f);
-        _player.ProcessMode = ProcessModeEnum.Inherit;
+        _terrain = new TerrainGenerator(seed);
+        _pendingSpawn = spawn;
+        RequestChunks();
     }
 
     /// <summary>Free the current world's nodes so a voyage can rebuild cleanly.</summary>
@@ -158,8 +178,61 @@ public partial class World3D : Node3D
         _foliage.Clear();
         _foliageByTile.Clear();
         _tileDiffs.Clear();
+        _fetchedChunks.Clear();
+        _pendingChunks.Clear();
         _structures.Clear();
         _remotes.Clear();
+    }
+
+    /// <summary>
+    /// Asks the server for every chunk the build radius will render. Building is
+    /// deferred until all of them are in hand — the pristine seed alone cannot
+    /// tell a standing tree from one already felled by another player, or by this
+    /// same player last session.
+    /// </summary>
+    private void RequestChunks()
+    {
+        _fetchedChunks.Clear();
+        _pendingChunks.Clear();
+        ShowStatus("Loading world…");
+
+        for (int cy = -Radius; cy <= Radius; cy++)
+        for (int cx = -Radius; cx <= Radius; cx++)
+        {
+            var coord = new ChunkCoord(cx, cy);
+            _pendingChunks.Add(coord);
+            _connection.RequestChunk(coord);
+        }
+    }
+
+    /// <summary>
+    /// Records one fetched chunk. Once every requested chunk is in, folds every
+    /// tile that differs from the pristine seed into <see cref="_tileDiffs"/> —
+    /// the same overlay a live TileChanged applies — so <see cref="Build"/> never
+    /// grows foliage the server has already harvested away.
+    /// </summary>
+    private void OnChunkReceived(ChunkCoord coord, TileType[] tiles)
+    {
+        _fetchedChunks[coord] = tiles;
+        if (!_pendingChunks.Remove(coord) || _pendingChunks.Count > 0) return;
+
+        int size = TerrainGenerator.ChunkSize;
+        foreach (var (chunkCoord, chunkTiles) in _fetchedChunks)
+        {
+            int ox = chunkCoord.X * size, oy = chunkCoord.Y * size;
+            for (int ly = 0; ly < size; ly++)
+            for (int lx = 0; lx < size; lx++)
+            {
+                int wx = ox + lx, wy = oy + ly;
+                var actual = chunkTiles[ly * size + lx];
+                if (actual != _terrain.TileAt(wx, wy)) _tileDiffs[(wx, wy)] = actual;
+            }
+        }
+
+        ShowStatus("");
+        Build();
+        _player.Teleport(_pendingSpawn + Vector3.Up * 1.5f);
+        _player.ProcessMode = ProcessModeEnum.Inherit;
     }
 
     /// <summary>Realign the local clock to the server's authoritative time-of-day.</summary>
@@ -229,8 +302,6 @@ public partial class World3D : Node3D
 
     private void Build()
     {
-        _terrain = new TerrainGenerator(Seed);
-
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
 
@@ -333,7 +404,7 @@ public partial class World3D : Node3D
             for (int lx = 0; lx < size; lx++)
             {
                 int wx = coord.X * size + lx, wy = coord.Y * size + ly;
-                if (_terrain.TileAt(wx, wy) != TileType.Forest) continue;
+                if (EffectiveTile(wx, wy) != TileType.Forest) continue;
 
                 // Centre of the tile, sitting on the ground.
                 float x = (float)((wx + 0.5) * metres);
@@ -375,7 +446,7 @@ public partial class World3D : Node3D
             for (int lx = 0; lx < size; lx++)
             {
                 int wx = coord.X * size + lx, wy = coord.Y * size + ly;
-                if (_terrain.TileAt(wx, wy) != TileType.Shrub) continue;
+                if (EffectiveTile(wx, wy) != TileType.Shrub) continue;
 
                 float y = (float)_terrain.HeightAt(wx + 0.5, wy + 0.5);
 
@@ -414,7 +485,7 @@ public partial class World3D : Node3D
             for (int lx = 0; lx < size; lx++)
             {
                 int wx = coord.X * size + lx, wy = coord.Y * size + ly;
-                if (_terrain.TileAt(wx, wy) != TileType.BerryBush) continue;
+                if (EffectiveTile(wx, wy) != TileType.BerryBush) continue;
 
                 float y = (float)_terrain.HeightAt(wx + 0.5, wy + 0.5);
 
