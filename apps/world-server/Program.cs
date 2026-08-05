@@ -47,6 +47,23 @@ long tick = 0;
 // tick, never on the background task itself.
 var pendingGatewayCompletions = new ConcurrentQueue<Action>();
 
+// Reserves a CharacterId for the player currently claiming it, from the
+// moment Hello starts the async claim until it resolves. `players` alone
+// isn't enough for this: a peer that disconnects mid-claim is removed from
+// `players` immediately (see PeerDisconnectedEvent), which would otherwise
+// let a fast reconnect start a second, concurrent claim for the same
+// character while the first is still in flight against the gateway.
+var claimingCharacters = new Dictionary<Guid, Player>();
+
+// Releases `player`'s reservation, but only if it still owns it — a claim
+// that resolves after the player already disconnected and reconnected (a new
+// Player object holds the reservation now) must not clear the new claim.
+void ReleaseClaim(Player player)
+{
+    if (claimingCharacters.TryGetValue(player.CharacterId, out var owner) && owner == player)
+        claimingCharacters.Remove(player.CharacterId);
+}
+
 var listener = new EventBasedNetListener();
 var server = new NetManager(listener) { UpdateTime = 15 };
 
@@ -76,7 +93,10 @@ listener.PeerDisconnectedEvent += (peer, info) =>
         // ever loaded into this Player, so Inventory/Survival are still
         // defaults — saving now would overwrite the gateway's real copy with
         // blanks. RejectJoin/CompleteJoin check `players` before acting and
-        // will no-op harmlessly once removed above.
+        // will no-op harmlessly once removed above. Release the reservation now
+        // rather than waiting for that (possibly slow) completion, so a fast
+        // reconnect for the same character isn't rejected as a duplicate.
+        ReleaseClaim(player);
         Console.WriteLine($"[world] player {player.Id} disconnected mid-join for character {player.CharacterId}; nothing loaded, nothing to save");
     }
     else if (player.Releasing)
@@ -121,10 +141,12 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
     // resolved yet: Inventory/Survival are still defaults, or are about to be
     // handed off, so nothing here would be meaningful. Everyone else's
     // messages keep flowing — this gates only this one connection.
+    // Not logged: ClientState alone arrives at ClientStateHz, so logging every
+    // gated packet would flood the console for exactly the slow-gateway
+    // duration this change exists to tolerate. The join/release starting and
+    // resolving is already logged once each, which is what matters here.
     if (player.JoinPending || player.Releasing)
     {
-        Console.WriteLine($"[world] ignoring {id} from player {player.Id}: " +
-                          (player.JoinPending ? "join still pending" : "release in flight"));
         reader.Recycle();
         return;
     }
@@ -150,16 +172,23 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // would otherwise load a second, independent in-memory copy of one
             // inventory: two Player objects, each free to spend the same starting
             // items. Reject outright rather than risk two sessions mutating one
-            // character. CharacterId is assigned synchronously, right here on the
-            // packet thread, before the async claim kicked off below — this check
-            // and the assignment never race with another connection's Hello.
-            if (players.Values.Any(p => p != player && p.CharacterId == characterId))
+            // character. Checked against both live players and in-flight claims
+            // (claimingCharacters) — a peer that disconnects mid-claim leaves
+            // `players` immediately but keeps its reservation until the claim
+            // actually resolves, so a fast reconnect can't start a second,
+            // concurrent claim for the same character. CharacterId is assigned
+            // synchronously, right here on the packet thread, before the async
+            // claim kicked off below — this check and the assignment never race
+            // with another connection's Hello.
+            if (players.Values.Any(p => p != player && p.CharacterId == characterId)
+                || claimingCharacters.ContainsKey(characterId))
             {
                 Console.WriteLine($"[world] rejecting duplicate connection for character {characterId}");
                 peer.Disconnect();
                 break;
             }
             player.CharacterId = characterId;
+            claimingCharacters[characterId] = player;
 
             string ticketText = reader.GetString();
 
@@ -543,7 +572,7 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                     return;
                 }
 
-                pendingGatewayCompletions.Enqueue(() => CompleteRelease(peer, player, grant));
+                pendingGatewayCompletions.Enqueue(() => CompleteRelease(peer, player, grant, targetWorldId));
             });
             break;
         }
@@ -649,6 +678,7 @@ void Broadcast(NetDataWriter data, NetPeer? exclude = null,
 // PeerDisconnectedEvent's JoinPending branch).
 void RejectJoin(NetPeer peer, Player player, string reason)
 {
+    ReleaseClaim(player);
     if (!players.TryGetValue(peer, out var current) || current != player) return;
     player.JoinPending = false;
     Console.WriteLine($"[world] rejecting join for {player.CharacterId}: {reason}");
@@ -657,6 +687,7 @@ void RejectJoin(NetPeer peer, Player player, string reason)
 
 void CompleteJoin(NetPeer peer, Player player, CharacterState character)
 {
+    ReleaseClaim(player);
     if (!players.TryGetValue(peer, out var current) || current != player) return;
     player.JoinPending = false;
     player.LoadCharacter(character);
@@ -733,7 +764,7 @@ void DenyRelease(NetPeer peer, Player player, string reason)
     peer.Send(writer, DeliveryMethod.ReliableOrdered);
 }
 
-void CompleteRelease(NetPeer peer, Player player, VoyageGrant grant)
+void CompleteRelease(NetPeer peer, Player player, VoyageGrant grant, string targetWorldId)
 {
     if (!players.TryGetValue(peer, out var current) || current != player) return;
 
@@ -749,7 +780,7 @@ void CompleteRelease(NetPeer peer, Player player, VoyageGrant grant)
 
     players.Remove(peer);
     Console.WriteLine($"[world] released player {player.Id} ({player.CharacterId}) " +
-                      $"to {grant.TargetHost}:{grant.TargetPort}");
+                      $"to {targetWorldId} at {grant.TargetHost}:{grant.TargetPort}");
 
     writer.Reset();
     writer.Put((byte)MessageId.PlayerLeft);
