@@ -42,9 +42,9 @@ tests/sim-core.tests  The only automated test project in the repo. Covers
 
 1. Client connects UDP to a world-server, sends `Hello` (protocol version,
    device UUID, optional voyage ticket).
-2. World-server, synchronously (blocking its one packet/tick thread — see
-   Known debt): claims the character from the gateway
-   (`POST /characters/{id}/claim`, atomic ownership + load), replies
+2. World-server claims the character from the gateway
+   (`POST /characters/{id}/claim`, atomic ownership + load) on a background
+   `Task`, not the packet/tick thread (see Concurrency below), replies
    `Welcome` with spawn position, then backfills existing structures.
 3. Client requests chunks around itself; world-server regenerates each chunk
    from `(seed, coord)` via `sim-core.TerrainGenerator`, layers any stored
@@ -61,13 +61,51 @@ tests/sim-core.tests  The only automated test project in the repo. Covers
    gateway (in-memory state is already authoritative and snapshotted
    synchronously before the async write, so this doesn't risk a torn read).
 7. A voyage (`RequestVoyage` → `RequestRelease`) has world-server A save the
-   character synchronously, mint a single-use ticket via the gateway, hand
-   the ticket to the client, and drop the entity; world-server B claims the
-   ticket on the client's `Hello` arrival. Character ownership
-   (`character.owner_world_id` in Postgres) is the single source of truth for
-   who may load a given character — see the July 24 log entry for why this
-   used to be unenforced on a plain join and is now claimed atomically
-   everywhere, including the non-voyage path.
+   character, then mint a single-use ticket via the gateway — both on a
+   background `Task` now, ordered save-then-mint, same as before this was
+   made non-blocking (see Concurrency below) — hand the ticket to the
+   client, and drop the entity; world-server B claims the ticket on the
+   client's `Hello` arrival. Character ownership (`character.owner_world_id`
+   in Postgres) is the single source of truth for who may load a given
+   character — see the July 24 log entry for why this used to be unenforced
+   on a plain join and is now claimed atomically everywhere, including the
+   non-voyage path.
+
+## Concurrency
+
+`world-server` is single-threaded by design (one packet/tick loop; see
+Process map). Until 2026-08-05 the `Hello` and `RequestRelease` handlers
+blocked that thread on the gateway HTTP round trip via
+`.GetAwaiter().GetResult()`, so a slow or unreachable gateway stalled
+*every* connected player's movement/harvest/tick broadcasts, not just the
+joining/leaving one — the highest-scored finding in `BACKLOG.md`'s history.
+
+The gateway call for both handlers now runs on a background `Task`; its
+result is enqueued as a closure onto `pendingGatewayCompletions`
+(`ConcurrentQueue<Action>`), drained once per tick right after
+`server.PollEvents()`. Every closure — `CompleteJoin`/`RejectJoin`/
+`CompleteRelease`/`DenyRelease` — runs exclusively on the tick thread, so
+`players`, the reusable `writer` buffer, and `NetPeer.Send`/`Disconnect`
+still have exactly one writer. Each checks `players.TryGetValue(peer, ...)`
+before acting and no-ops if the peer already disconnected while the call was
+in flight.
+
+Two `Player` flags gate the window a claim/release is outstanding:
+`JoinPending` (from `Hello` until the claim resolves — `Inventory`/
+`Survival` are still defaults until then) and `Releasing` (from
+`RequestRelease` until the save+voyage-grant resolves). While either is
+true, `NetworkReceiveEvent`'s top-of-handler check silently drops every
+other message from that one connection; other players are never gated.
+
+A `claimingCharacters` reservation (`Dictionary<Guid, Player>`, separate
+from `players`) closes a race a same-night independent review caught: a
+peer that disconnects mid-claim is removed from `players` immediately, so
+without this a fast reconnect for the same `CharacterId` would sail past
+the duplicate-connection check and start a second, concurrent claim before
+the first resolved. The reservation is released by whichever of
+`RejectJoin`/`CompleteJoin`/a mid-join disconnect runs first, and is keyed
+by the owning `Player` object so a claim that resolves late can't clear a
+newer reservation for the same character.
 
 ## Determinism
 
@@ -106,24 +144,25 @@ never for a value that depends on enumeration order.
 
 ## Known debt (see `BACKLOG.md` for scored, actionable entries)
 
-- **World-server is single-threaded and blocks on gateway HTTP calls** inside
-  the packet-receive handler (`Hello`, `RequestRelease`) via
-  `.GetAwaiter().GetResult()`. A slow or unreachable gateway stalls
-  *every* connected player's movement/harvest/tick processing for the
-  duration of the call, on every join and every voyage. Scored in
-  `BACKLOG.md`; not fixed tonight because it needs a real architecture
-  change (a pending-join queue drained from the tick loop) — bigger blast
-  radius to get wrong for less certain gain than the ownership bug, which is
-  a five-minute-round-trip data bug that's already exploitable today.
-- **`World3D.cs` (735 lines) and `SurvivalHud.cs` (940 lines)** are god
-  scripts mixing net dispatch, terrain streaming, foliage generation,
-  touch-input, harvest targeting, and (for the HUD) a full tabbed
-  inventory/craft/build UI with no reusable widget. Matches
-  `docs/gameplay-roadmap.md` §3.4, and has grown since that doc was written,
-  not shrunk.
-- **`WorldConnection.cs`'s `OnReceive`** is a 12-case hand-decoded switch on
-  `MessageId` with no compile-time check that field order matches the
-  server's writer — a reordering on either side is a silent wire bug.
+- ~~World-server is single-threaded and blocks on gateway HTTP calls~~ —
+  **fixed 2026-08-05**, see the Concurrency section above and `LOG.md`.
+- **Building/blueprint/architect-mode system has no dedicated audit pass
+  yet.** Landed entirely after the 2026-07-24 audit (`BuildSite`,
+  `StructureCatalog`, blueprint protocol + persistence, architect-mode UI,
+  roof shelter, collision) — real new server-authoritative surface
+  (`BuildingRules.Validate`, four new message types, a new persistence
+  table) that hasn't had a multiplayer-correctness pass. Flagged to
+  `BACKLOG.md` for a future Phase 1.
+- **`World3D.cs` (1103 lines, up from 735) and `SurvivalHud.cs` (1124 lines,
+  up from 940)** are god scripts mixing net dispatch, terrain streaming,
+  foliage generation, touch-input, harvest targeting, and (for the HUD) a
+  full tabbed inventory/craft/build UI with no reusable widget. Matches
+  `docs/gameplay-roadmap.md` §3.4, and keeps growing rather than shrinking —
+  up roughly 50% each since the 2026-07-24 count.
+- **`WorldConnection.cs`'s `OnReceive`** (now 534 lines total) is a
+  hand-decoded switch on `MessageId` with no compile-time check that field
+  order matches the server's writer — a reordering on either side is a
+  silent wire bug.
 - **`World3D.UpdateGatherPrompt`** runs a 7×7-tile noise-heavy scan every
   physics tick unconditionally (even while the action sheet is open), which
   matters on mobile battery/thermal even though it isn't a correctness bug.
@@ -136,12 +175,21 @@ net10.0. This is intentional (net10 referencing net8 libs works); don't
 
 ## Build/test environment caveat
 
-This session had **no working `dotnet` SDK** (not installed, and the
-network policy blocks `builds.dotnet.microsoft.com` needed to install one)
-and **no Docker daemon** (docker CLI present, socket absent) — so nothing
-in this repo could be compiled, run, or tested tonight. All review and all
-changes were done by careful manual reading, cross-referencing existing
-working code paths for idiom/pattern, and balance-checking braces/parens.
-A human must run `dotnet build` and `dotnet test tests/sim-core.tests`
-before trusting tonight's diff. See `LOG.md` for exactly what is and isn't
-verified.
+Two nightly sessions in a row (2026-07-24, 2026-08-05) have had **no working
+`dotnet` SDK** — this time `apt-get install dotnet-sdk-10.0` was actually
+available in the package index (unlike last time), but every `.deb` fetch
+404'd against both `archive.ubuntu.com` and `security.ubuntu.com` through
+the environment's proxy; same result for `dotnet-sdk-8.0`. **No Docker
+daemon** either (CLI present, socket absent) — so nothing in this repo could
+be compiled, run, or tested either night. All review and all changes were
+done by careful manual reading, cross-referencing existing working code
+paths for idiom/pattern, balance-checking braces/parens programmatically,
+and — new this session — a second independent agent re-reading the full
+diff cold (no context from the implementing session) specifically hunting
+for races and compile errors, which did catch one real gap (see `LOG.md`).
+That is a real substitute for careful review, not for a compiler: a human
+must run `dotnet build` and `dotnet test tests/sim-core.tests` before
+trusting either night's diff. If this keeps recurring, it's worth someone
+checking whether the sandboxed network policy can allow the Ubuntu package
+mirrors `dotnet-install.sh` needs, or pre-baking an SDK into the session
+image, so a third night doesn't hit the exact same wall.
