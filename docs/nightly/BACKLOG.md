@@ -14,21 +14,14 @@ suspect the codebase has moved since.
   deleted per the "never silently repeat/undo, and log what you found"
   discipline — this is the one thing tonight's session fixed.
 
-- **World-server blocks its single packet/tick thread on gateway HTTP calls**
-  (`apps/world-server/Program.cs:121,144,322-325` — `Hello` and
-  `RequestRelease` both call `.GetAwaiter().GetResult()` on an HTTP round
-  trip). Score: Severity 4 × Blast radius 5 = **20**. A slow or unreachable
-  gateway freezes movement/harvest/tick broadcasts for *every* connected
-  player, on every join and every voyage — this is not a rare edge case, it's
-  the common path. Not fixed tonight: the correct fix is a real architecture
-  change (kick off the HTTP call as a real `Task`, park the connecting peer
-  in a "pending" state that only skips gameplay messages, and drain
-  completions from a thread-safe queue on the next tick so `PollEvents()`
-  cadence for everyone else is never blocked). That's a bigger, riskier
-  change than "ship one thing and be done" allows for a single night, and it
-  deserves its own dedicated session with room to actually reason about the
-  pending-state lifecycle (what happens if the peer disconnects mid-claim,
-  etc.) rather than being squeezed in alongside another fix.
+- **[FIXED 2026-08-05]** ~~World-server blocks its single packet/tick thread
+  on gateway HTTP calls~~ (`apps/world-server/Program.cs` `Hello` and
+  `RequestRelease`, both used to call `.GetAwaiter().GetResult()` on an HTTP
+  round trip). Was Severity 4 × Blast radius 5 = **20**. This is exactly the
+  dedicated session the 2026-07-24 entry below asked for — see tonight's
+  `LOG.md` entry for the fix (background `Task` + drained completion queue +
+  `JoinPending`/`Releasing` gating + a `claimingCharacters` reservation to
+  close a fast-reconnect race an independent review caught mid-session).
 
 ### Mobile performance
 
@@ -97,18 +90,51 @@ suspect the codebase has moved since.
 ### Testing
 
 - **No test coverage at all for `apps/gateway` or `apps/world-server`** — only
-  `sim-core` has a test project. The ownership-claim fix landed tonight
-  (`POST /characters/{id}/claim`) has no automated regression test; it was
-  verified by manual code review only (see `LOG.md` — no dotnet SDK available
-  this session). A future night should add an integration test project that
-  spins up the gateway against a real (or testcontainers) Postgres and
-  exercises the claim/voyage/save endpoints directly, including the
-  concurrent-claim race this fix targets.
+  `sim-core` has a test project. Neither the 2026-07-24 ownership-claim fix
+  nor tonight's async-claim rework has an automated regression test; both
+  were verified by manual code review only (see `LOG.md` — no dotnet SDK
+  available either night). A future night should add an integration test
+  project that spins up the gateway against a real (or testcontainers)
+  Postgres and exercises the claim/voyage/save endpoints directly, including
+  the concurrent-claim race both fixes targeted — and ideally a fake/mock
+  `GatewayClient` the world-server side can use to test `JoinPending`/
+  `Releasing`/`claimingCharacters` behavior (slow response, disconnect
+  mid-claim, fast reconnect) without a real HTTP round trip at all.
+
+## From 2026-08-05 audit
+
+Ran Phase 1 by re-checking every item below against the current code rather
+than a full fresh sweep — the one item that had crossed both fix-tonight
+thresholds (blocking gateway calls, previous section) was confirmed still
+present and fixed; see `LOG.md`. Did **not** do a dedicated audit pass over
+the building/blueprint/architect-mode system, which landed entirely after
+the 2026-07-24 audit (commits `9dc784d`..`6731ba0`, ~15 commits: `BuildSite`,
+`StructureCatalog`, blueprint protocol + server handlers + persistence,
+architect-mode client UI, roof shelter, collision, animated player body).
+That's real new surface area — server-authoritative validation
+(`BuildingRules.Validate`), a new persistence table, four new message types —
+that hasn't had a multiplayer-correctness pass yet. Flagging for next night's
+Phase 1 rather than attempting it as a rushed add-on tonight.
+
+- **God scripts have grown further, not shrunk**: `World3D.cs` 735→**1103**
+  lines, `SurvivalHud.cs` 940→**1124** lines (both up ~50% since the
+  2026-07-24 count), `WorldConnection.cs`'s hand-decoded switch now **534**
+  lines total. Re-score next time one of these is touched — likely higher
+  than the 9s logged in 2026-07-24, since blast radius grows with every
+  feature that adds another branch to `OnReceive` or another tab to the
+  action sheet instead of composing existing widgets. Still not attempted:
+  matches roadmap §3.4, same fix as logged above, just more overdue.
 
 ## Rejected feature ideas (logged per Phase-2 discipline, not built — audit
 found a fix-tonight-caliber bug first, so Phase 2 wasn't reached)
 
-None yet — Phase 2 (new feature) was skipped tonight because the audit
-surfaced a multiplayer-correctness finding scoring 20 (over the 15 threshold,
-and over the 9 threshold on the multiplayer-correctness track), which the
-routine's decision rule requires fixing instead of building new content.
+**2026-08-05:** Same as below — the backlog's carried-over blocking-gateway-
+calls finding (Severity 4 × Blast radius 5 = 20, multiplayer-correctness ≥9)
+was confirmed still present, so per the routine's decision rule Phase 2 was
+skipped again without generating or rejecting any feature ideas.
+
+**2026-07-24:** None — Phase 2 (new feature) was skipped tonight because the
+audit surfaced a multiplayer-correctness finding scoring 20 (over the 15
+threshold, and over the 9 threshold on the multiplayer-correctness track),
+which the routine's decision rule requires fixing instead of building new
+content.

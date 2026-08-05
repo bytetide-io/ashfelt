@@ -28,6 +28,22 @@ public sealed class Player
     /// </summary>
     public Guid CharacterId { get; set; }
 
+    /// <summary>
+    /// True from the moment Hello sets <see cref="CharacterId"/> until the
+    /// async gateway claim it kicked off resolves. <see cref="Inventory"/> and
+    /// <see cref="Survival"/> are still defaults while this is true, so the
+    /// packet loop must ignore gameplay messages for this player until it
+    /// clears — see world-server Program.cs.
+    /// </summary>
+    public bool JoinPending { get; set; }
+
+    /// <summary>
+    /// True from RequestRelease until the async gateway save+voyage-grant it
+    /// kicked off resolves. Gates gameplay messages so nothing mutates state
+    /// that is about to be handed off to another world-server.
+    /// </summary>
+    public bool Releasing { get; set; }
+
     /// <summary>Last accepted position, in metres.</summary>
     public Vec3 Position { get; private set; }
 

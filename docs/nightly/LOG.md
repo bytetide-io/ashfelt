@@ -5,6 +5,169 @@ session — see the routine's prompt for the required shape.
 
 ---
 
+## 2026-08-05 — AUDIT-ONLY (fix, not feature)
+
+**Chose:** Fixed the `world-server` blocking-gateway-calls finding the
+2026-07-24 audit deliberately deferred: `Hello` (character claim, voyage
+ticket claim) and `RequestRelease` (character save, voyage grant) each
+called `.GetAwaiter().GetResult()` on a gateway HTTP round trip from inside
+the single packet-receive handler, freezing movement/harvest/tick broadcasts
+for *every* connected player, on every join and every voyage, for however
+long that call took.
+
+**Because:** Phase 1 audit this session was a targeted re-check rather than
+a fresh sweep: I re-read the full `docs/nightly/BACKLOG.md` from the last
+run, confirmed the highest-scored open item (Severity 4 × Blast radius 5 =
+20, multiplayer-correctness ≥ 9) by reading the current
+`apps/world-server/Program.cs` end to end — still four blocking call sites,
+unchanged from the July 24 description. That clears both fix-tonight
+thresholds, so per the routine's decision rule Phase 2 (new feature) was
+skipped again. I did not do a fresh audit pass over the building/blueprint/
+architect-mode system that landed in the ~15 commits since the last audit
+(`9dc784d`..`6731ba0`) — flagged to `BACKLOG.md`/`ARCH.md` for a future
+night rather than squeezed in alongside tonight's fix.
+
+**Changed:**
+- `apps/world-server/Program.cs` — `Hello`'s ticket claim
+  (`ClaimVoyageAsync`) and character claim (`ClaimCharacterAsync`), and
+  `RequestRelease`'s save (`SaveCharacterAsync`) + voyage grant
+  (`RequestVoyageAsync`), all now run inside a background `Task.Run(async
+  () => ...)` instead of blocking the packet thread. Each background task's
+  outcome is enqueued as a closure onto a new `pendingGatewayCompletions`
+  (`ConcurrentQueue<Action>`), drained once per tick right after
+  `server.PollEvents()` — so `players`, the reusable `writer` buffer, and
+  every `NetPeer.Send`/`Disconnect` call still have exactly one thread
+  touching them, same as before. Four new local functions
+  (`CompleteJoin`/`RejectJoin`/`CompleteRelease`/`DenyRelease`) hold the
+  logic that used to run inline in the handlers; each checks
+  `players.TryGetValue(peer, ...)` first and no-ops if the peer already
+  disconnected while its gateway call was in flight.
+- `apps/world-server/Player.cs` — two new flags, `JoinPending` (true from
+  `Hello` until the claim resolves — `Inventory`/`Survival` are still
+  defaults until then) and `Releasing` (true from `RequestRelease` until the
+  save+grant resolves). `NetworkReceiveEvent` now drops every other message
+  from a connection while either is true, so nothing acts on a half-loaded
+  or about-to-be-handed-off player.
+- `apps/world-server/Program.cs`, `PeerDisconnectedEvent` — no longer saves
+  the character on disconnect when `JoinPending` (nothing was ever loaded,
+  so saving would overwrite the gateway's real state with blanks) or
+  `Releasing` (the release's own task already owns saving a pre-captured
+  snapshot; saving again would just be a redundant identical write).
+- A same-session independent review (a second agent, no context from the
+  implementing session, told to hunt specifically for races/compile errors)
+  caught a real gap: a peer that disconnects mid-claim is removed from
+  `players` immediately, so a fast reconnect for the same `CharacterId`
+  could start a second, concurrent claim before the first resolved — no
+  in-process corruption (both claims are same-`worldId` and idempotent, and
+  the stale completion safely no-ops), but it weakened the single-owner
+  guarantee the surrounding comments assert. Fixed in a follow-up commit: a
+  `claimingCharacters` reservation (`Dictionary<Guid, Player>`, separate
+  from `players`), held from `Hello` until whichever of
+  `RejectJoin`/`CompleteJoin`/a mid-join disconnect resolves first, keyed by
+  the owning `Player` so a late-resolving claim can't clear a newer
+  reservation for the same character. Same pass also fixed two smaller
+  findings: the gate no longer logs every dropped packet (would flood the
+  console for exactly the slow-gateway duration this exists to tolerate —
+  `ClientState` alone arrives at `ClientStateHz`), and restored
+  `targetWorldId` to the release-completed log line where it had gone
+  missing.
+- `docs/nightly/{LOG,BACKLOG,ARCH}.md` — this entry; marked the fixed
+  finding struck-through in `BACKLOG.md`; added a `## Concurrency` section
+  to `ARCH.md` describing the new mechanism; noted the unaudited building
+  system and the god-scripts' continued growth (`World3D.cs` 735→1103
+  lines, `SurvivalHud.cs` 940→1124 lines) for a future Phase 1.
+
+**Risk:** The core behavior change is timing, not semantics: a client now
+waits for `Welcome`/`ReleaseGranted` slightly later relative to when
+`Hello`/`RequestRelease` was sent (one background-task hop instead of
+inline), and any message it sends before that arrives is now silently
+dropped instead of being processed against a half-initialized `Player`. A
+well-behaved client (waits for `Welcome` before sending gameplay messages,
+per the existing protocol) sees no difference. The `claimingCharacters` fix
+closes a race that only this session's own refactor introduced — nothing in
+the pre-existing synchronous code had this window, so this is a case of a
+fix creating and then closing its own new edge case, not an existing bug.
+Smaller risk: `PeerDisconnectedEvent` now has three branches instead of one
+before deciding whether to save; a mistake in that branching (e.g.
+`Releasing` and `JoinPending` both somehow true) would silently skip a save
+that should have happened — traced by hand that the two flags are mutually
+exclusive (`Releasing` is only set on an already-fully-joined player, i.e.
+`JoinPending` false), but this is exactly the kind of thing a test would
+catch and none exists (see `BACKLOG.md`).
+
+**Revert:** `git revert` the two commits on this branch touching
+`apps/world-server/Program.cs` and `apps/world-server/Player.cs` (the second
+commit is the fast-reconnect-race fix on top of the first; revert both
+together or the reservation logic references fields the first commit adds).
+No database migration, no protocol/wire change — a code revert alone is
+fully reversible.
+
+**Verified:** Read every touched region of both files end-to-end after
+editing, twice. Balance-checked braces/parens programmatically after each
+edit. Traced every `Task.Run` closure by hand to confirm it never touches
+`players`/`writer`/`NetPeer` directly — only gateway calls and
+`pendingGatewayCompletions.Enqueue`. Traced the `claimingCharacters` fix by
+hand against the specific race scenario the independent review described
+(disconnect mid-claim → fast reconnect → stale completion arrives late) and
+confirmed the `owner == player` guard prevents it from clearing a newer
+reservation. Then had a second agent — fresh context, explicitly told this
+session had no compiler and to hunt for races/compile errors/regressions —
+read the diff cold; it found one real gap (fixed, above) and two nitpicks
+(also fixed), and found no compile errors or unguarded cross-thread
+mutation after a careful pass it described in its own words.
+
+**Not verified — a human must check on a real setup:** *Nothing in this
+repo was built, run, or tested tonight.* Tried harder than last time to fix
+that — `apt-get install dotnet-sdk-10.0` was actually candidate-available
+this session (unlike 2026-07-24), but every package fetch 404'd against
+both Ubuntu mirrors through the environment's proxy; same failure for
+`dotnet-sdk-8.0`. No Docker daemon either. Concretely, a human needs to:
+1. `dotnet build` the whole solution — not confirmed to compile.
+2. `dotnet test tests/sim-core.tests` — untouched by this change, should
+   still pass, but not actually run.
+3. Bring up `infra/docker/docker-compose.yml`'s Postgres, run the gateway
+   and a world-server, and reproduce the scenario this fix targets: point
+   the gateway's `/characters/{id}/claim` at an artificial delay (or just
+   watch real latency) and confirm other connected players' movement/
+   harvest keeps flowing while one client's `Hello` is still resolving.
+4. Reproduce the fast-reconnect race directly: connect, send `Hello`,
+   disconnect before `Welcome` arrives, immediately reconnect with the same
+   device UUID, and confirm the second `Hello` is accepted (not rejected as
+   a duplicate) once the first's abandoned claim is cleaned up.
+5. Confirm a legitimate voyage (A → B) still works end-to-end, and that
+   `RequestRelease` still denies cleanly when the target world is
+   unreachable/unknown.
+6. Confirm the client build still launches for the mobile target — client
+   code wasn't touched at all tonight, but not personally confirmed.
+
+**Rejected tonight:** Didn't attempt a fresh audit of the building/
+blueprint/architect-mode system (landed since the last audit, no
+multiplayer-correctness pass yet) — flagged to `BACKLOG.md`/`ARCH.md`
+instead of squeezed in alongside tonight's fix, per "ship one thing."
+Didn't re-score the god-script findings (`World3D.cs`, `SurvivalHud.cs`,
+`WorldConnection.cs`) even though line counts grew substantially — noted the
+new counts, left re-scoring for whoever picks the fix up, since scoring
+without intent to fix this session felt like busywork. Didn't start on
+Phase 2 (new feature) — the decision rule says skip it entirely when a
+fix-tonight finding exists, and the carried-over one still did.
+
+**Added to backlog:** Building/blueprint/architect-mode system needs a
+dedicated multiplayer-correctness audit pass (unscored — no read yet to
+score against). God-script line-count growth noted for re-scoring next time
+one is touched. Everything else carried over unchanged from 2026-07-24 (see
+`BACKLOG.md`).
+
+**Question for the human:** None blocking. Two things worth your attention:
+(1) please run the build/test/manual-race verification listed above before
+this reaches real player data, since none of it happened automatically
+either of the last two nights; (2) if the dotnet-SDK-install failure keeps
+recurring, it might be worth checking whether the sandboxed environment's
+network policy can reach the Ubuntu package mirrors these installs need, or
+pre-baking an SDK into the session image — two nights in a row losing all
+compiler verification to the same infrastructure wall is a real cost.
+
+---
+
 ## 2026-07-24 — AUDIT-ONLY (fix, not feature)
 
 **Chose:** Closed a character-duplication hole: the world-server's normal
