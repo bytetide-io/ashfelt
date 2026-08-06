@@ -10,17 +10,27 @@ namespace Ashfall.Client;
 /// </summary>
 public partial class RemotePlayers : Node3D
 {
+    // The server now only broadcasts players within its interest radius
+    // (see Tuning.InterestRadiusMetres), so a remote player legitimately stops
+    // appearing in snapshots when they walk out of range, not just when they
+    // disconnect. PlayerLeft removes a disconnect immediately; this timeout is
+    // the fallback for an interest-range exit (and for a dropped PlayerLeft).
+    private const float StaleTimeoutSeconds = 1.5f;
+
     private readonly Dictionary<int, Node3D> _bodies = new();
     private readonly Dictionary<int, Vector3> _targets = new();
     private readonly Dictionary<int, float> _yaws = new();
+    private readonly Dictionary<int, ulong> _lastSeenMsec = new();
 
     public void Apply(IReadOnlyList<PlayerState> states, int localId)
     {
+        ulong now = Time.GetTicksMsec();
         foreach (var state in states)
         {
             if (state.Id == localId) continue;
             _targets[state.Id] = state.Position;
             _yaws[state.Id] = state.Yaw;
+            _lastSeenMsec[state.Id] = now;
             if (!_bodies.ContainsKey(state.Id)) CallDeferred(nameof(Spawn), state.Id, state.Position);
         }
     }
@@ -43,6 +53,7 @@ public partial class RemotePlayers : Node3D
     {
         _targets.Remove(id);
         _yaws.Remove(id);
+        _lastSeenMsec.Remove(id);
         if (_bodies.Remove(id, out var body)) body.QueueFree();
     }
 
@@ -53,10 +64,21 @@ public partial class RemotePlayers : Node3D
         _bodies.Clear();
         _targets.Clear();
         _yaws.Clear();
+        _lastSeenMsec.Clear();
     }
 
     public override void _Process(double delta)
     {
+        ulong now = Time.GetTicksMsec();
+        ulong timeoutMsec = (ulong)(StaleTimeoutSeconds * 1000);
+        foreach (var id in new List<int>(_bodies.Keys))
+        {
+            if (now - _lastSeenMsec.GetValueOrDefault(id) > timeoutMsec)
+            {
+                Remove(id);
+            }
+        }
+
         float weight = Mathf.Min(1f, (float)delta * 12f);
         foreach (var (id, body) in _bodies)
         {

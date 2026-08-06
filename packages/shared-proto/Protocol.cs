@@ -153,6 +153,14 @@ public static class Tuning
     /// <summary>Radius, in chunks, of the area a client is kept informed about.</summary>
     public const int InterestRadiusChunks = 1;
 
+    /// <summary>
+    /// How far, in metres, one player's position/yaw is broadcast to another.
+    /// InterestRadiusChunks(1) * ChunkSize(32) * TileMetres(2) — kept as a literal
+    /// here because shared-proto cannot reference sim-core's TerrainGenerator
+    /// without a circular project reference.
+    /// </summary>
+    public const double InterestRadiusMetres = 64.0;
+
     /// <summary>A full day/night cycle, in real seconds.</summary>
     public const int SecondsPerGameDay = 600;
 

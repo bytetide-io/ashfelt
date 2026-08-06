@@ -20,6 +20,7 @@ Console.WriteLine($"[world] seed={seed} restored {restored} diff(s), {structures
 
 var players = new Dictionary<NetPeer, Player>();
 var writer = new NetDataWriter();
+var nearbyPlayers = new List<Player>();
 int nextPlayerId = 1;
 long tick = 0;
 
@@ -391,19 +392,34 @@ while (!shutdown.IsSet)
 
     if (players.Count > 0)
     {
-        writer.Reset();
-        writer.Put((byte)MessageId.PlayerStates);
-        writer.Put((byte)players.Count);
-        foreach (var player in players.Values)
+        // Per invariant #6 (interest management), a recipient only hears about
+        // players within Tuning.InterestRadiusMetres of themselves, not the whole
+        // world — bandwidth for this message would otherwise grow with total
+        // world population instead of local density.
+        foreach (var recipient in players.Values)
         {
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            writer.Put(player.Yaw);
+            nearbyPlayers.Clear();
+            foreach (var other in players.Values)
+            {
+                if (other.Id == recipient.Id ||
+                    other.Position.HorizontalDistanceTo(recipient.Position) <= Tuning.InterestRadiusMetres)
+                    nearbyPlayers.Add(other);
+            }
+
+            writer.Reset();
+            writer.Put((byte)MessageId.PlayerStates);
+            writer.Put((byte)nearbyPlayers.Count);
+            foreach (var other in nearbyPlayers)
+            {
+                writer.Put(other.Id);
+                writer.Put((float)other.Position.X);
+                writer.Put((float)other.Position.Y);
+                writer.Put((float)other.Position.Z);
+                writer.Put(other.Yaw);
+            }
+            // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
+            recipient.Peer.Send(writer, DeliveryMethod.Unreliable);
         }
-        // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
-        Broadcast(writer, method: DeliveryMethod.Unreliable);
 
         foreach (var player in players.Values)
         {
