@@ -111,6 +111,49 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                 Console.WriteLine($"[world] claimed voyaging character {player.CharacterId}");
             }
 
+            // A second live connection presenting the same character — a quick
+            // app relaunch before the old socket timed out, or two devices
+            // sharing a UUID — must never run two Player objects against one
+            // gateway character. Left alone, both load an independent copy of
+            // the inventory and whichever disconnects last silently overwrites
+            // the other's progress (a duplication/loss bug). This runs only once
+            // this connection is already validated (protocol version, and any
+            // voyage ticket claimed above), so a forged/expired ticket can never
+            // evict a legitimate session for a join that is about to be rejected
+            // anyway. Evict the stale connection and flush its state first, so
+            // the load below always reads the freshest save.
+            NetPeer? stalePeer = null;
+            if (player.CharacterId != Guid.Empty)
+            {
+                foreach (var (candidatePeer, candidate) in players)
+                {
+                    if (candidatePeer == peer || candidate.CharacterId != player.CharacterId) continue;
+                    stalePeer = candidatePeer;
+                    break;
+                }
+            }
+
+            if (stalePeer is not null)
+            {
+                var stale = players[stalePeer];
+                players.Remove(stalePeer);
+
+                try { gateway.SaveCharacterAsync(stale.CharacterId, stale.ToCharacterState()).GetAwaiter().GetResult(); }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(
+                        $"[world] character save failed evicting duplicate session for {stale.CharacterId}: {ex.Message}");
+                }
+
+                Console.WriteLine($"[world] player {stale.Id} evicted — character {stale.CharacterId} reconnected as player {player.Id}");
+                stalePeer.Disconnect();
+
+                writer.Reset();
+                writer.Put((byte)MessageId.PlayerLeft);
+                writer.Put(stale.Id);
+                Broadcast(writer, exclude: peer);
+            }
+
             // Load happens at Hello (not connect) because the UUID is only known
             // now. Blocking the loop here is deliberate: joining is inherently a
             // wait, and seeding synchronously keeps the inventory the tick loop
