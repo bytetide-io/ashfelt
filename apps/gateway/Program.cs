@@ -98,6 +98,36 @@ app.MapPut("/characters/{id:guid}", async (Guid id, CharacterState character, Np
     return Results.Ok();
 });
 
+// Character ownership claim: a world-server calls this before loading a
+// character on a normal (non-voyage) join. Succeeds when no world currently
+// owns the character, or this world already does (a reconnect to the same
+// world); fails when another world holds it live. This is what the voyage
+// ticket flow already enforces for transfers — without it, a direct join
+// never checked ownership at all, so the same character could be loaded live
+// by two world-servers at once and silently duplicate or lose items when both
+// saved on disconnect. Creates the row on a brand-new character.
+app.MapPost("/characters/{id:guid}/claim", async (Guid id, CharacterClaim req, NpgsqlDataSource db) =>
+{
+    // Self-heal first: a stale, unclaimed voyage ticket must release ownership
+    // back to its origin world before this claim is evaluated, same as GET.
+    await ReclaimExpiredTicketAsync(db, id);
+
+    await using var cmd = db.CreateCommand("""
+        INSERT INTO character (id, owner_world_id)
+        VALUES ($1, $2)
+        ON CONFLICT (id) DO UPDATE SET owner_world_id = $2
+        WHERE character.owner_world_id IS NULL OR character.owner_world_id = $2
+        RETURNING id
+        """);
+    cmd.Parameters.AddWithValue(id);
+    cmd.Parameters.AddWithValue(req.WorldId);
+    var claimedId = await cmd.ExecuteScalarAsync();
+
+    return claimedId is null
+        ? Results.Conflict(new { error = "character already owned by another world" })
+        : Results.Ok();
+});
+
 // Voyage mint: world-server A (the trusted caller — never the client) marks the
 // character in-transit toward a target world and gets back a single-use ticket
 // plus the target's address. A calls this during RequestRelease, after it has
@@ -168,12 +198,15 @@ app.MapPost("/voyage/claim", async (VoyageClaim req, NpgsqlDataSource db) =>
         return Results.StatusCode(StatusCodes.Status410Gone);
     }
 
+    // owner_world_id IS NULL guards against the character having been reclaimed
+    // (e.g. a direct rejoin to the origin world) since the ticket was minted —
+    // ownership must still be released, or this claim does not win it.
     await using var claim = db.CreateCommand("""
         WITH consumed AS (
             DELETE FROM voyage_ticket WHERE character_id = $1 RETURNING character_id
         )
         UPDATE character SET owner_world_id = $2
-        WHERE id = (SELECT character_id FROM consumed)
+        WHERE id = (SELECT character_id FROM consumed) AND owner_world_id IS NULL
         """);
     claim.Parameters.AddWithValue(req.CharacterId);
     claim.Parameters.AddWithValue(req.WorldId);
@@ -206,5 +239,6 @@ static async Task ReclaimExpiredTicketAsync(NpgsqlDataSource db, Guid characterI
 }
 
 record WorldEntry(string Id, string Host, int Port);
+record CharacterClaim(string WorldId);
 record VoyageRequest(Guid CharacterId, string FromWorldId, string TargetWorldId);
 record VoyageClaim(Guid CharacterId, Guid Ticket, string WorldId);

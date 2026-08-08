@@ -38,6 +38,19 @@ public sealed class GatewayClient
     }
 
     /// <summary>
+    /// Claims ownership of a character for a normal (non-voyage) join. True when
+    /// no other world currently owns it, or this world already does; false when
+    /// another world holds it live — the caller must then reject the join, since
+    /// the same character must never be loaded by two world-servers at once.
+    /// </summary>
+    public async Task<bool> ClaimCharacterAsync(Guid characterId, string worldId)
+    {
+        var response = await _http.PostAsJsonAsync($"/characters/{characterId}/claim",
+            new { worldId });
+        return response.IsSuccessStatusCode;
+    }
+
+    /// <summary>
     /// Marks a character in-transit toward <paramref name="targetWorldId"/> and
     /// mints a single-use ticket. Returns the target address plus the ticket, or
     /// null when the target world is unknown or the mint failed — in which case

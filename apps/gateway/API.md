@@ -62,3 +62,23 @@ PUT /characters/6f9619ff-8b86-d011-b42d-00cf4fc964ff
 ```
 200 OK
 ```
+
+## POST /characters/{id}/claim
+
+Claims ownership of a character for a normal (non-voyage) join. A world-server
+calls this **before** `GET /characters/{id}` on every plain connect — it is the
+join-path counterpart to `/voyage/claim`, which already enforces ownership for
+transfers. Succeeds when no world owns the character yet, or the calling world
+already does (a reconnect); creates the row on a brand-new character.
+
+- `id` — UUID (path).
+
+```json
+POST /characters/6f9619ff-8b86-d011-b42d-00cf4fc964ff/claim
+{ "worldId": "continent-a" }
+```
+
+```
+200 OK          — claimed; the caller may now load the character
+409 Conflict    — another world currently owns this character live
+```

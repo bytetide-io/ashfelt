@@ -92,23 +92,53 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
             string ticketText = reader.GetString();
 
-            // A voyage arrival carries a ticket: this server must claim ownership
-            // before it may load the character. A failed claim (expired, forged,
-            // already used) means the character is not ours to load — reject the
-            // join rather than risk two worlds owning one character. A normal join
-            // has an empty ticket and loads as before.
-            if (ticketText.Length > 0)
-            {
-                bool claimed = Guid.TryParse(ticketText, out var ticket)
+            // Every join — voyage arrival or plain (re)connect — must claim
+            // ownership before it may load the character. A failed claim (bad
+            // ticket, or another world already holds it live) means the
+            // character is not ours to load — reject the join rather than risk
+            // two worlds owning one character at once.
+            bool claimed = ticketText.Length > 0
+                ? Guid.TryParse(ticketText, out var ticket)
                     && gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId)
-                        .GetAwaiter().GetResult();
-                if (!claimed)
-                {
-                    Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
-                    peer.Disconnect();
-                    break;
-                }
+                        .GetAwaiter().GetResult()
+                : gateway.ClaimCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
+            if (!claimed)
+            {
+                Console.WriteLine($"[world] rejecting join for {player.CharacterId}: " +
+                                  (ticketText.Length > 0 ? "bad ticket" : "owned by another world"));
+                peer.Disconnect();
+                break;
+            }
+            if (ticketText.Length > 0)
                 Console.WriteLine($"[world] claimed voyaging character {player.CharacterId}");
+
+            // A reconnect (mobile network flap, app resume) can race the old
+            // peer's disconnect event. Without this, two NetPeer sessions for one
+            // CharacterId could run on this server at once — the gateway claim
+            // above only guards against a *different* world, since a reconnect to
+            // the world that already owns the character trivially re-claims it.
+            // Save-then-drop the stale session so only one copy of the inventory
+            // is ever live.
+            var stale = players.Values.FirstOrDefault(p => p != player && p.CharacterId == player.CharacterId);
+            if (stale is not null)
+            {
+                Console.WriteLine($"[world] player {stale.Id} superseded by reconnect for character {player.CharacterId}");
+                try
+                {
+                    gateway.SaveCharacterAsync(stale.CharacterId, stale.ToCharacterState()).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[world] stale-session save failed for {stale.CharacterId}: {ex.Message}");
+                }
+
+                players.Remove(stale.Peer);
+                stale.Peer.Disconnect();
+
+                writer.Reset();
+                writer.Put((byte)MessageId.PlayerLeft);
+                writer.Put(stale.Id);
+                Broadcast(writer, exclude: peer);
             }
 
             // Load happens at Hello (not connect) because the UUID is only known

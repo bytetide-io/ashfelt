@@ -20,6 +20,11 @@ open-water crossing is deliberately deferred (see non-goals).
 
 - A character is owned by **exactly one** world-server at a time. The
   in-transit state exists so a crash mid-transfer can never duplicate items.
+  This is enforced at **every** join, not only voyage arrivals: a plain
+  (re)connect calls `POST /characters/{id}/claim` before loading, and is
+  rejected if another world already owns the character live. Without this, a
+  direct join never checked ownership at all — see `docs/nightly/LOG.md`
+  2026-08-08.
 - The client is never trusted with character state during handoff — it carries
   a ticket, not an inventory.
 - If B refuses or times out, the gateway returns the character to A. Failure
