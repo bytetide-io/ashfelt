@@ -28,6 +28,14 @@ public sealed class Player
     /// </summary>
     public Guid CharacterId { get; set; }
 
+    /// <summary>
+    /// True once <see cref="LoadCharacter"/> has actually run for this
+    /// connection — i.e. the gateway confirmed this world owns the character.
+    /// Guards every write back to the gateway: a rejected or not-yet-loaded join
+    /// must never save the player's blank default state over the real one.
+    /// </summary>
+    public bool CharacterLoaded { get; private set; }
+
     /// <summary>Last accepted position, in metres.</summary>
     public Vec3 Position { get; private set; }
 
@@ -127,6 +135,7 @@ public sealed class Player
         Survival = SurvivalRules.FromPoints(
             character.Hunger, character.Stamina, character.Health, character.Warmth);
         InventoryDirty = true;
+        CharacterLoaded = true;
     }
 
     /// <summary>Snapshots the persistent character state for saving to the gateway.</summary>

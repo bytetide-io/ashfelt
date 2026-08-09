@@ -19,13 +19,17 @@ public sealed class GatewayClient
     }
 
     /// <summary>
-    /// Fetches a character, or null when the gateway has none yet (a fresh
-    /// device UUID) — the caller then starts the player empty and full.
+    /// Fetches a character, claiming ownership for <paramref name="worldId"/> in
+    /// the same call — a fresh device UUID gets a new row and starts empty and
+    /// full. Returns null when the gateway refused the claim because another
+    /// world already owns the character, or a voyage is currently in flight for
+    /// it; the caller must reject the join rather than load a character live
+    /// somewhere else.
     /// </summary>
-    public async Task<CharacterState?> GetCharacterAsync(Guid id)
+    public async Task<CharacterState?> GetCharacterAsync(Guid id, string worldId)
     {
-        var response = await _http.GetAsync($"/characters/{id}");
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        var response = await _http.GetAsync($"/characters/{id}?worldId={Uri.EscapeDataString(worldId)}");
+        if (response.StatusCode == HttpStatusCode.Conflict) return null;
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<CharacterState>();
     }
