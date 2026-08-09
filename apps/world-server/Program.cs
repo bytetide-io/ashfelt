@@ -49,7 +49,13 @@ listener.PeerDisconnectedEvent += (peer, info) =>
     // Save the character back to the gateway off the packet loop so a slow
     // write never stalls the players still in the world. The state is snapshot
     // now, synchronously, so the async write sees a stable copy.
-    if (player.CharacterId != Guid.Empty)
+    //
+    // CharacterLoaded guards this: a connection that never actually claimed the
+    // character (rejected join, or a gateway hiccup at Hello) still has a
+    // CharacterId parsed off the wire, but its in-memory state is just the
+    // player's blank defaults — saving that would overwrite the real character
+    // with an empty inventory.
+    if (player.CharacterId != Guid.Empty && player.CharacterLoaded)
     {
         var characterId = player.CharacterId;
         var snapshot = player.ToCharacterState();
@@ -116,12 +122,25 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // wait, and seeding synchronously keeps the inventory the tick loop
             // reads free of cross-thread mutation. Saves, by contrast, are
             // fire-and-forget so a leaving player never stalls the others.
+            //
+            // The load call also claims ownership for this world (see
+            // GatewayClient.GetCharacterAsync): a null result means another world
+            // already owns this character, or a voyage is in flight for it, and
+            // this join must be rejected rather than load a character that is
+            // live somewhere else — that would let two world-servers mutate and
+            // save the same inventory independently, duplicating or losing items.
             try
             {
-                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
-                if (character is not null) player.LoadCharacter(character);
-                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
-                                  (character is null ? "is new" : "loaded"));
+                var character = gateway.GetCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
+                if (character is null)
+                {
+                    Console.WriteLine($"[world] rejecting player {player.Id}: character {player.CharacterId} " +
+                                      "is owned by another world or mid-voyage");
+                    peer.Disconnect();
+                    break;
+                }
+                player.LoadCharacter(character);
+                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} claimed");
             }
             catch (Exception ex)
             {
@@ -311,6 +330,7 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             }
 
             if (player.CharacterId == Guid.Empty) { Deny("no character"); break; }
+            if (!player.CharacterLoaded) { Deny("character not loaded"); break; }
 
             // Save synchronously first: the gateway must hold the authoritative
             // state before any world can claim it, or a voyage could load stale

@@ -41,9 +41,17 @@ app.MapGet("/worlds", () => Results.Ok(worlds.Values));
 // ticket self-heals — ownership returns to the world the character left.
 const int TicketTtlSeconds = 60;
 
-// Character load: returns the stored inventory + survival meters, or 404 when
-// the device UUID has never saved a character.
-app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
+// Character load + join claim: returns the stored inventory + survival meters,
+// atomically claiming ownership for the joining world so a character is never
+// live in two world-servers at once — the plain-Hello half of invariant #3's
+// "owned by exactly one world-server at a time" (the voyage half is /voyage
+// and /voyage/claim below, which this was not consulting before). A character
+// mid-voyage (owner NULL, a live ticket) is not joinable by a bare Hello — only
+// the ticket's target world may take it, via /voyage/claim. A brand-new UUID
+// gets a fresh row it now owns. Ownership persists across a plain
+// disconnect/reconnect to the same world; moving to a different world requires
+// the voyage protocol, never a bare Hello.
+app.MapGet("/characters/{id:guid}", async (Guid id, string worldId, NpgsqlDataSource db) =>
 {
     // Self-heal a stranded voyage: if this character has a ticket that expired
     // unclaimed, ownership returns to the world it left before we hand the state
@@ -51,12 +59,36 @@ app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
     // the player simply reconnects and is loaded as if the voyage never began.
     await ReclaimExpiredTicketAsync(db, id);
 
-    await using var cmd = db.CreateCommand(
-        "SELECT inventory, hunger, stamina, health, warmth FROM character WHERE id = $1");
-    cmd.Parameters.AddWithValue(id);
+    // Claim-or-create in one statement, so the read below can never observe a
+    // character another world still owns. The WHERE guards the conflict path
+    // only: an existing row updates when unowned or already ours AND no live
+    // voyage ticket exists for it. That second condition matters: an in-flight
+    // voyage leaves owner_world_id NULL on purpose (see ReclaimExpiredTicketAsync
+    // and /voyage above), and without excluding a live ticket here, a plain
+    // Hello racing the transfer would read NULL as "unclaimed" and grab the
+    // character out from under the voyage's actual target world. Owned by
+    // someone else, or mid-voyage, means the conflicting row is left untouched
+    // and RETURNING yields nothing.
+    await using var claim = db.CreateCommand("""
+        WITH claimed AS (
+            INSERT INTO character (id, owner_world_id)
+            VALUES ($1, $2)
+            ON CONFLICT (id) DO UPDATE
+                SET owner_world_id = $2
+                WHERE (character.owner_world_id IS NULL OR character.owner_world_id = $2)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM voyage_ticket WHERE voyage_ticket.character_id = character.id
+                  )
+            RETURNING inventory, hunger, stamina, health, warmth
+        )
+        SELECT * FROM claimed
+        """);
+    claim.Parameters.AddWithValue(id);
+    claim.Parameters.AddWithValue(worldId);
 
-    await using var reader = await cmd.ExecuteReaderAsync();
-    if (!await reader.ReadAsync()) return Results.NotFound();
+    await using var reader = await claim.ExecuteReaderAsync();
+    if (!await reader.ReadAsync())
+        return Results.Conflict(new { error = $"character '{id}' is owned by another world (or mid-voyage)" });
 
     var character = new CharacterState
     {
