@@ -46,6 +46,11 @@ listener.PeerDisconnectedEvent += (peer, info) =>
     if (!players.Remove(peer, out var player)) return;
     Console.WriteLine($"[world] player {player.Id} disconnected ({info.Reason})");
 
+    // Drop the disconnected id from every remaining player's visible set so the
+    // next tick's interest diff does not also send a redundant targeted
+    // PlayerLeft on top of the broadcast below.
+    foreach (var other in players.Values) other.VisiblePlayerIds.Remove(player.Id);
+
     // Save the character back to the gateway off the packet loop so a slow
     // write never stalls the players still in the world. The state is snapshot
     // now, synchronously, so the async write sees a stable copy.
@@ -391,19 +396,50 @@ while (!shutdown.IsSet)
 
     if (players.Count > 0)
     {
-        writer.Reset();
-        writer.Put((byte)MessageId.PlayerStates);
-        writer.Put((byte)players.Count);
-        foreach (var player in players.Values)
+        // Interest management (invariant #5): each viewer gets only the players
+        // standing in a chunk within Tuning.InterestRadiusChunks of their own —
+        // never the whole world, so per-tick bandwidth stops growing with total
+        // player count and starts growing with local crowd size instead.
+        foreach (var viewer in players.Values)
         {
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            writer.Put(player.Yaw);
+            var visible = new List<Player>();
+            foreach (var other in players.Values)
+                if (other.Id != viewer.Id &&
+                    InterestRules.InRange(viewer.Chunk, other.Chunk, Tuning.InterestRadiusChunks))
+                    visible.Add(other);
+
+            writer.Reset();
+            writer.Put((byte)MessageId.PlayerStates);
+            writer.Put((byte)visible.Count);
+            foreach (var other in visible)
+            {
+                writer.Put(other.Id);
+                writer.Put((float)other.Position.X);
+                writer.Put((float)other.Position.Y);
+                writer.Put((float)other.Position.Z);
+                writer.Put(other.Yaw);
+            }
+            // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
+            viewer.Peer.Send(writer, DeliveryMethod.Unreliable);
+
+            var visibleIds = new HashSet<int>();
+            foreach (var other in visible) visibleIds.Add(other.Id);
+
+            // Anyone who fell out of interest range since the last snapshot gets a
+            // targeted "left" so this client despawns them — without it a player
+            // who walks out of range would freeze in place forever instead of
+            // disappearing, which is worse than not filtering at all.
+            foreach (var goneId in viewer.VisiblePlayerIds)
+            {
+                if (visibleIds.Contains(goneId)) continue;
+                writer.Reset();
+                writer.Put((byte)MessageId.PlayerLeft);
+                writer.Put(goneId);
+                viewer.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
+            }
+            viewer.VisiblePlayerIds.Clear();
+            viewer.VisiblePlayerIds.UnionWith(visibleIds);
         }
-        // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
-        Broadcast(writer, method: DeliveryMethod.Unreliable);
 
         foreach (var player in players.Values)
         {

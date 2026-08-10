@@ -39,6 +39,27 @@ public sealed class Player
 
     public int Rejections { get; private set; }
 
+    /// <summary>
+    /// Chunk this player currently stands in, recomputed from the last accepted
+    /// position. The unit interest management (invariant #5) filters broadcasts by.
+    /// </summary>
+    public ChunkCoord Chunk
+    {
+        get
+        {
+            var tile = MovementRules.TileOf(Position);
+            return World.ChunkOf(tile.X, tile.Y);
+        }
+    }
+
+    /// <summary>
+    /// Other player ids this player was sent in the last <see cref="MessageId.PlayerStates"/>
+    /// snapshot. Diffed each tick against who is newly in range so a player who
+    /// walks out of interest range gets a targeted <see cref="MessageId.PlayerLeft"/>
+    /// instead of freezing in place on the client that can no longer see them.
+    /// </summary>
+    public HashSet<int> VisiblePlayerIds { get; } = new();
+
     public Dictionary<ItemId, int> Inventory { get; } = new();
     public bool InventoryDirty { get; set; }
 
