@@ -46,22 +46,7 @@ listener.PeerDisconnectedEvent += (peer, info) =>
     if (!players.Remove(peer, out var player)) return;
     Console.WriteLine($"[world] player {player.Id} disconnected ({info.Reason})");
 
-    // Save the character back to the gateway off the packet loop so a slow
-    // write never stalls the players still in the world. The state is snapshot
-    // now, synchronously, so the async write sees a stable copy.
-    if (player.CharacterId != Guid.Empty)
-    {
-        var characterId = player.CharacterId;
-        var snapshot = player.ToCharacterState();
-        _ = Task.Run(async () =>
-        {
-            try { await gateway.SaveCharacterAsync(characterId, snapshot); }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[world] character save failed for {characterId}: {ex.Message}");
-            }
-        });
-    }
+    AutosaveCharacter(player, "disconnect");
 
     writer.Reset();
     writer.Put((byte)MessageId.PlayerLeft);
@@ -423,6 +408,12 @@ while (!shutdown.IsSet)
 
         if (tick % Tuning.StatsHeartbeatTicks == 0)
             foreach (var player in players.Values) SendStats(player, tick);
+
+        // Bounds how much progress an ungraceful crash can lose: without this,
+        // only the disconnect/release paths ever save, so every still-connected
+        // player's inventory and survival meters live in memory only.
+        if (tick % Tuning.CharacterAutosaveTicks == 0)
+            foreach (var player in players.Values) AutosaveCharacter(player, "autosave");
     }
 
     Thread.Sleep(tickMs);
@@ -431,6 +422,28 @@ while (!shutdown.IsSet)
 server.Stop();
 Console.WriteLine("[world] stopped");
 return 0;
+
+// Saves the character back to the gateway off the packet loop so a slow write
+// never stalls the players still in the world. The state is snapshot now,
+// synchronously, so the async write sees a stable copy. Skips a player with a
+// save already in flight rather than piling up requests behind a slow gateway.
+void AutosaveCharacter(Player player, string reason)
+{
+    if (player.CharacterId == Guid.Empty || player.SaveInFlight) return;
+
+    player.SaveInFlight = true;
+    var characterId = player.CharacterId;
+    var snapshot = player.ToCharacterState();
+    _ = Task.Run(async () =>
+    {
+        try { await gateway.SaveCharacterAsync(characterId, snapshot); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[world] character {reason} save failed for {characterId}: {ex.Message}");
+        }
+        finally { player.SaveInFlight = false; }
+    });
+}
 
 void Broadcast(NetDataWriter data, NetPeer? exclude = null,
     DeliveryMethod method = DeliveryMethod.ReliableOrdered)

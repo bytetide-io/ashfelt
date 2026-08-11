@@ -158,4 +158,12 @@ public static class Tuning
 
     /// <summary>Heartbeat cadence for survival meters when nothing changed.</summary>
     public const int StatsHeartbeatTicks = TicksPerSecond * 2;
+
+    /// <summary>
+    /// How often an online player's character is saved to the gateway without
+    /// them leaving. Bounds how much inventory/survival progress an ungraceful
+    /// server crash can lose — the disconnect/release saves alone leave every
+    /// still-connected player's progress unpersisted until they quit.
+    /// </summary>
+    public const int CharacterAutosaveTicks = TicksPerSecond * 60;
 }

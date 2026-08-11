@@ -42,6 +42,13 @@ public sealed class Player
     public Dictionary<ItemId, int> Inventory { get; } = new();
     public bool InventoryDirty { get; set; }
 
+    /// <summary>
+    /// True while a fire-and-forget save to the gateway is in flight for this
+    /// player, so a slow gateway can't pile up overlapping autosaves for the
+    /// same character.
+    /// </summary>
+    public bool SaveInFlight { get; set; }
+
     /// <summary>Authoritative survival meters. Spawns full; drains on the tick.</summary>
     public SurvivalRules.SurvivalState Survival { get; private set; } = SurvivalRules.SurvivalState.Full;
 
