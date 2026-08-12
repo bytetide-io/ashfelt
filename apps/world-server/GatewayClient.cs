@@ -18,22 +18,38 @@ public sealed class GatewayClient
         _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
     }
 
-    /// <summary>
-    /// Fetches a character, or null when the gateway has none yet (a fresh
-    /// device UUID) — the caller then starts the player empty and full.
-    /// </summary>
-    public async Task<CharacterState?> GetCharacterAsync(Guid id)
-    {
-        var response = await _http.GetAsync($"/characters/{id}");
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
-        response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<CharacterState>();
-    }
-
     /// <summary>Upserts a character, creating it on first save.</summary>
     public async Task SaveCharacterAsync(Guid id, CharacterState character)
     {
         var response = await _http.PutAsJsonAsync($"/characters/{id}", character);
+        response.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
+    /// Claims exclusive ownership of a character for a normal (non-voyage) join
+    /// and returns its stored state. Atomic on the gateway: only one world-server
+    /// can hold the claim at a time, so this is what stops the same character
+    /// being loaded live in two places at once. Returns null when the character
+    /// is already claimed elsewhere and not stale — the caller must reject the
+    /// join rather than risk a duplicate.
+    /// </summary>
+    public async Task<CharacterState?> ClaimCharacterAsync(Guid id, string worldId)
+    {
+        var response = await _http.PostAsJsonAsync($"/characters/{id}/claim", new { worldId });
+        if (response.StatusCode == HttpStatusCode.Conflict) return null;
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<CharacterState>();
+    }
+
+    /// <summary>
+    /// Releases this world's ownership claim on a clean disconnect, so the
+    /// character is immediately rejoinable instead of waiting out the gateway's
+    /// staleness window. Best-effort: a failed release just means the next join
+    /// elsewhere waits for that window, never a duplicate.
+    /// </summary>
+    public async Task ReleaseCharacterAsync(Guid id, string worldId)
+    {
+        var response = await _http.PostAsJsonAsync($"/characters/{id}/release", new { worldId });
         response.EnsureSuccessStatusCode();
     }
 
@@ -53,14 +69,16 @@ public sealed class GatewayClient
 
     /// <summary>
     /// Validates and consumes an arriving client's voyage ticket, taking
-    /// ownership of the character for this world. True on success; false when the
-    /// ticket is invalid, expired or already claimed (the caller rejects the join).
+    /// ownership of the character for this world and returning its stored state.
+    /// Null when the ticket is invalid, expired or already claimed — the caller
+    /// rejects the join rather than risk a duplicate.
     /// </summary>
-    public async Task<bool> ClaimVoyageAsync(Guid characterId, Guid ticket, string worldId)
+    public async Task<CharacterState?> ClaimVoyageAsync(Guid characterId, Guid ticket, string worldId)
     {
         var response = await _http.PostAsJsonAsync("/voyage/claim",
             new { characterId, ticket, worldId });
-        return response.IsSuccessStatusCode;
+        if (!response.IsSuccessStatusCode) return null;
+        return await response.Content.ReadFromJsonAsync<CharacterState>();
     }
 }
 

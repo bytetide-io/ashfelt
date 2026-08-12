@@ -42,7 +42,10 @@ app.MapGet("/worlds", () => Results.Ok(worlds.Values));
 const int TicketTtlSeconds = 60;
 
 // Character load: returns the stored inventory + survival meters, or 404 when
-// the device UUID has never saved a character.
+// the device UUID has never saved a character. Read-only and does not touch
+// ownership — a world-server joining a player must go through
+// POST /characters/{id}/claim (or /voyage/claim) instead, so this stays safe
+// for tooling/inspection without being a second, unguarded way to load state.
 app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
 {
     // Self-heal a stranded voyage: if this character has a ticket that expired
@@ -67,6 +70,65 @@ app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
         Warmth = reader.GetInt32(4),
     };
     return Results.Ok(character);
+});
+
+// How long an ownership claim is honoured without a matching release before a
+// reclaim from elsewhere is allowed to override it. This is the crash backstop:
+// a clean disconnect calls /release immediately, so this only matters when a
+// world-server dies without ever getting the chance.
+const int OwnerStaleSeconds = 300;
+
+// Ownership claim: a world-server calls this on every normal join (Hello with
+// no voyage ticket) before it may load the character. Atomic: it only succeeds
+// when nobody else holds a live claim, so two world-servers can never load the
+// same character at once. Creates the row with defaults on a character's very
+// first join, so ownership is tracked from the start rather than only from
+// first save. Returns 409 when the character is claimed elsewhere and not
+// stale — the caller must reject the join rather than risk a duplicate.
+app.MapPost("/characters/{id:guid}/claim", async (Guid id, ClaimRequest req, NpgsqlDataSource db) =>
+{
+    await using var cmd = db.CreateCommand($"""
+        INSERT INTO character (id, owner_world_id, owner_claimed_at, updated_at)
+        VALUES ($1, $2, now(), now())
+        ON CONFLICT (id) DO UPDATE SET
+            owner_world_id = $2,
+            owner_claimed_at = now()
+        WHERE character.owner_world_id IS NULL
+           OR character.owner_world_id = $2
+           OR character.owner_claimed_at < now() - interval '{OwnerStaleSeconds} seconds'
+        RETURNING inventory, hunger, stamina, health, warmth
+        """);
+    cmd.Parameters.AddWithValue(id);
+    cmd.Parameters.AddWithValue(req.WorldId);
+
+    await using var reader = await cmd.ExecuteReaderAsync();
+    if (!await reader.ReadAsync())
+        return Results.Conflict(new { error = $"character '{id}' is already active on another world" });
+
+    var character = new CharacterState
+    {
+        Inventory = reader.GetFieldValue<Dictionary<string, int>>(0),
+        Hunger = reader.GetInt32(1),
+        Stamina = reader.GetInt32(2),
+        Health = reader.GetInt32(3),
+        Warmth = reader.GetInt32(4),
+    };
+    return Results.Ok(character);
+});
+
+// Ownership release: called on a clean disconnect from a normal (non-voyage)
+// session, so the character is immediately rejoinable instead of waiting out
+// the staleness window. Guarded by world id so a stale release from a session
+// that already lost its claim (e.g. to a reclaim after a crash) cannot clear
+// a newer owner's claim.
+app.MapPost("/characters/{id:guid}/release", async (Guid id, ClaimRequest req, NpgsqlDataSource db) =>
+{
+    await using var cmd = db.CreateCommand(
+        "UPDATE character SET owner_world_id = NULL WHERE id = $1 AND owner_world_id = $2");
+    cmd.Parameters.AddWithValue(id);
+    cmd.Parameters.AddWithValue(req.WorldId);
+    await cmd.ExecuteNonQueryAsync();
+    return Results.Ok();
 });
 
 // Character save: upsert the character, creating the row on first save.
@@ -168,22 +230,36 @@ app.MapPost("/voyage/claim", async (VoyageClaim req, NpgsqlDataSource db) =>
         return Results.StatusCode(StatusCodes.Status410Gone);
     }
 
+    // owner_claimed_at is set here too (not just by /characters/{id}/claim) so
+    // the same staleness self-heal covers a world-server that crashes after
+    // taking ownership via a voyage, not only via a normal join. RETURNING the
+    // state as well means the caller gets ownership and the character's data
+    // from one atomic call, the same shape as /characters/{id}/claim.
     await using var claim = db.CreateCommand("""
         WITH consumed AS (
             DELETE FROM voyage_ticket WHERE character_id = $1 RETURNING character_id
         )
-        UPDATE character SET owner_world_id = $2
+        UPDATE character SET owner_world_id = $2, owner_claimed_at = now()
         WHERE id = (SELECT character_id FROM consumed)
+        RETURNING inventory, hunger, stamina, health, warmth
         """);
     claim.Parameters.AddWithValue(req.CharacterId);
     claim.Parameters.AddWithValue(req.WorldId);
-    int rows = await claim.ExecuteNonQueryAsync();
 
+    await using var reader = await claim.ExecuteReaderAsync();
     // Lost the race to a concurrent claim that already consumed the row.
-    if (rows == 0)
+    if (!await reader.ReadAsync())
         return Results.Conflict(new { error = "ticket already claimed" });
 
-    return Results.Ok();
+    var character = new CharacterState
+    {
+        Inventory = reader.GetFieldValue<Dictionary<string, int>>(0),
+        Hunger = reader.GetInt32(1),
+        Stamina = reader.GetInt32(2),
+        Health = reader.GetInt32(3),
+        Warmth = reader.GetInt32(4),
+    };
+    return Results.Ok(character);
 });
 
 app.Run();
@@ -208,3 +284,4 @@ static async Task ReclaimExpiredTicketAsync(NpgsqlDataSource db, Guid characterI
 record WorldEntry(string Id, string Host, int Port);
 record VoyageRequest(Guid CharacterId, string FromWorldId, string TargetWorldId);
 record VoyageClaim(Guid CharacterId, Guid Ticket, string WorldId);
+record ClaimRequest(string WorldId);

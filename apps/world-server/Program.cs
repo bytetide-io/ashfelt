@@ -48,7 +48,11 @@ listener.PeerDisconnectedEvent += (peer, info) =>
 
     // Save the character back to the gateway off the packet loop so a slow
     // write never stalls the players still in the world. The state is snapshot
-    // now, synchronously, so the async write sees a stable copy.
+    // now, synchronously, so the async write sees a stable copy. Ownership is
+    // released after the save so a reconnect elsewhere never sees stale data;
+    // it is still attempted even if the save failed, since the alternative —
+    // holding the claim forever — just forces every future join to wait out
+    // the gateway's staleness window instead.
     if (player.CharacterId != Guid.Empty)
     {
         var characterId = player.CharacterId;
@@ -59,6 +63,12 @@ listener.PeerDisconnectedEvent += (peer, info) =>
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[world] character save failed for {characterId}: {ex.Message}");
+            }
+
+            try { await gateway.ReleaseCharacterAsync(characterId, worldId); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[world] ownership release failed for {characterId}: {ex.Message}");
             }
         });
     }
@@ -92,40 +102,86 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
             string ticketText = reader.GetString();
 
-            // A voyage arrival carries a ticket: this server must claim ownership
-            // before it may load the character. A failed claim (expired, forged,
-            // already used) means the character is not ours to load — reject the
-            // join rather than risk two worlds owning one character. A normal join
-            // has an empty ticket and loads as before.
+            // Every join — voyage arrival or a normal reconnect — must claim
+            // exclusive ownership on the gateway before loading. Without this the
+            // same character UUID could be loaded live on two world-servers at
+            // once (two client instances, or a reconnect racing a still-open
+            // session elsewhere), each holding an independent in-memory inventory
+            // that diverges and dupes anything persisted straight to world state
+            // (e.g. a placed structure). Loading happens at Hello (not connect)
+            // because the UUID is only known now; blocking the loop here is
+            // deliberate, since joining is inherently a wait and seeding
+            // synchronously keeps the inventory the tick loop reads free of
+            // cross-thread mutation. Saves, by contrast, are fire-and-forget so a
+            // leaving player never stalls the others.
             if (ticketText.Length > 0)
             {
-                bool claimed = Guid.TryParse(ticketText, out var ticket)
-                    && gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId)
-                        .GetAwaiter().GetResult();
-                if (!claimed)
+                // A voyage arrival must succeed end to end: the ticket was minted
+                // for a real, already-saved character, so a failed claim (expired,
+                // forged, already used) or an unreachable gateway both mean this
+                // world cannot safely take ownership — reject rather than either
+                // duplicate the character or silently drop its real inventory.
+                CharacterState? character;
+                try
+                {
+                    character = Guid.TryParse(ticketText, out var ticket)
+                        ? gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId).GetAwaiter().GetResult()
+                        : null;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[world] voyage claim failed for {player.CharacterId}: {ex.Message}");
+                    peer.Disconnect();
+                    break;
+                }
+                if (character is null)
                 {
                     Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
                     peer.Disconnect();
                     break;
                 }
+
+                player.LoadCharacter(character);
                 Console.WriteLine($"[world] claimed voyaging character {player.CharacterId}");
             }
+            else
+            {
+                // A normal join also has to claim ownership — see the comment
+                // above — but unlike a voyage arrival, there is a legitimate case
+                // where the gateway is simply not running at all (solo local
+                // testing, matching `WorldStore`'s own "no ASHFALL_DB" memory-only
+                // mode): nothing else could be holding a conflicting claim in that
+                // case, so an unreachable gateway degrades to an unpersisted,
+                // in-memory character rather than locking the player out. A
+                // *refused* claim (409, ownership genuinely held elsewhere) is
+                // never an exception — `ClaimCharacterAsync` returns null for
+                // that — so `gatewayReachable` is what tells the two apart.
+                bool gatewayReachable = true;
+                CharacterState? character = null;
+                try
+                {
+                    character = gateway.ClaimCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    gatewayReachable = false;
+                    Console.Error.WriteLine($"[world] gateway unreachable for {player.CharacterId}, " +
+                                            $"joining without persistence: {ex.Message}");
+                }
 
-            // Load happens at Hello (not connect) because the UUID is only known
-            // now. Blocking the loop here is deliberate: joining is inherently a
-            // wait, and seeding synchronously keeps the inventory the tick loop
-            // reads free of cross-thread mutation. Saves, by contrast, are
-            // fire-and-forget so a leaving player never stalls the others.
-            try
-            {
-                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
-                if (character is not null) player.LoadCharacter(character);
-                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
-                                  (character is null ? "is new" : "loaded"));
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[world] character load failed for {player.CharacterId}: {ex.Message}");
+                if (gatewayReachable && character is null)
+                {
+                    Console.WriteLine($"[world] rejecting join for {player.CharacterId}: " +
+                                      "already active on another world");
+                    peer.Disconnect();
+                    break;
+                }
+
+                if (character is not null)
+                {
+                    player.LoadCharacter(character);
+                    Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} loaded");
+                }
             }
 
             writer.Reset();
