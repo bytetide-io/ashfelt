@@ -46,6 +46,11 @@ listener.PeerDisconnectedEvent += (peer, info) =>
     if (!players.Remove(peer, out var player)) return;
     Console.WriteLine($"[world] player {player.Id} disconnected ({info.Reason})");
 
+    // Drop the id from everyone's known-remote-players set — without this, a
+    // long-lived server would leak one entry per departed player into every
+    // other player's set forever.
+    foreach (var other in players.Values) other.KnownPlayerIds.Remove(player.Id);
+
     // Save the character back to the gateway off the packet loop so a slow
     // write never stalls the players still in the world. The state is snapshot
     // now, synchronously, so the async write sees a stable copy.
@@ -140,14 +145,11 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             peer.Send(writer, DeliveryMethod.ReliableOrdered);
             player.InventoryDirty = true;
 
-            // Backfill the already-built world so a joining player sees every
-            // structure, not just the ones placed after they arrived.
+            // Backfill whatever is already nearby so a joining player sees the
+            // structures around their spawn point, not the whole world — the
+            // rest arrive via the per-tick discovery scan as they explore.
             foreach (var structure in world.Structures)
-            {
-                writer.Reset();
-                WriteStructurePlaced(writer, structure);
-                peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            }
+                SendStructureIfInRange(player, structure);
             break;
         }
 
@@ -289,9 +291,11 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // in memory, exactly as with harvest diffs.
             _ = store.SaveStructureAsync(placement.Structure);
 
-            writer.Reset();
-            WriteStructurePlaced(writer, placement.Structure);
-            Broadcast(writer);
+            // Only players currently near the placement learn about it now;
+            // anyone farther away picks it up via the discovery scan once they
+            // come into range, same as an existing structure.
+            foreach (var other in players.Values)
+                SendStructureIfInRange(other, placement.Structure);
 
             Console.WriteLine($"[world] player {player.Id} placed {kind} at ({tx},{ty})");
             break;
@@ -391,19 +395,12 @@ while (!shutdown.IsSet)
 
     if (players.Count > 0)
     {
-        writer.Reset();
-        writer.Put((byte)MessageId.PlayerStates);
-        writer.Put((byte)players.Count);
-        foreach (var player in players.Values)
-        {
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            writer.Put(player.Yaw);
-        }
-        // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
-        Broadcast(writer, method: DeliveryMethod.Unreliable);
+        foreach (var viewer in players.Values) SendPlayerStates(viewer);
+
+        if (tick % Tuning.StructureDiscoveryTicks == 0)
+            foreach (var viewer in players.Values)
+                foreach (var structure in world.Structures)
+                    SendStructureIfInRange(viewer, structure);
 
         foreach (var player in players.Values)
         {
@@ -465,4 +462,72 @@ static void WriteStructurePlaced(NetDataWriter data, Structure structure)
     data.Put((byte)structure.Kind);
     data.Put(structure.TileX);
     data.Put(structure.TileY);
+}
+
+static Vec3 StructureCentre(Structure structure, double atHeight)
+{
+    double metres = TerrainGenerator.TileMetres;
+    return new Vec3((structure.TileX + 0.5) * metres, atHeight, (structure.TileY + 0.5) * metres);
+}
+
+// Sends the structure to this player if it isn't already known and falls
+// within their interest range — otherwise a no-op. The one gate shared by
+// join backfill, live placement and the periodic discovery scan, so a
+// structure is never sent to a player twice.
+void SendStructureIfInRange(Player viewer, Structure structure)
+{
+    if (viewer.KnownStructureIds.Contains(structure.Id)) return;
+
+    var centre = StructureCentre(structure, viewer.Position.Y);
+    if (!InterestRules.IsWithinRange(viewer.Position, centre)) return;
+
+    writer.Reset();
+    WriteStructurePlaced(writer, structure);
+    viewer.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
+    viewer.KnownStructureIds.Add(structure.Id);
+}
+
+// Sends this viewer a snapshot of only the other players within their
+// interest range, and tells them about anyone who has left it since the last
+// tick — the interest-management counterpart to the old broadcast-everyone
+// snapshot, which leaked the whole roster to every client every tick.
+void SendPlayerStates(Player viewer)
+{
+    var inRange = new List<Player>();
+    foreach (var other in players.Values)
+    {
+        if (other.Id == viewer.Id) continue;
+        if (InterestRules.IsWithinRange(viewer.Position, other.Position)) inRange.Add(other);
+    }
+
+    foreach (var knownId in viewer.KnownPlayerIds)
+    {
+        bool stillInRange = false;
+        foreach (var other in inRange)
+            if (other.Id == knownId) { stillInRange = true; break; }
+        if (stillInRange) continue;
+
+        writer.Reset();
+        writer.Put((byte)MessageId.PlayerLeft);
+        writer.Put(knownId);
+        viewer.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
+    }
+    viewer.KnownPlayerIds.Clear();
+    foreach (var other in inRange) viewer.KnownPlayerIds.Add(other.Id);
+
+    if (inRange.Count == 0) return;
+
+    writer.Reset();
+    writer.Put((byte)MessageId.PlayerStates);
+    writer.Put((byte)inRange.Count);
+    foreach (var other in inRange)
+    {
+        writer.Put(other.Id);
+        writer.Put((float)other.Position.X);
+        writer.Put((float)other.Position.Y);
+        writer.Put((float)other.Position.Z);
+        writer.Put(other.Yaw);
+    }
+    // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
+    viewer.Peer.Send(writer, DeliveryMethod.Unreliable);
 }

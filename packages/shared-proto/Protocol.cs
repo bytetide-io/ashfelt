@@ -65,6 +65,11 @@ public enum MessageId : byte
     ChunkData = 101,
     /// <summary>Authoritative snapshot of every player in interest range.</summary>
     PlayerStates = 102,
+    /// <summary>
+    /// A player is gone: either they disconnected, or they walked out of the
+    /// receiving player's interest range. Layout: int player id. Either way the
+    /// client's response is identical — stop tracking that id.
+    /// </summary>
     PlayerLeft = 103,
     /// <summary>
     /// A node was struck but not yet felled. Layout: int tileX, int tileY, byte
@@ -92,9 +97,11 @@ public enum MessageId : byte
     StatsUpdate = 107,
 
     /// <summary>
-    /// A structure exists in the world; the client renders it. Sent both as the
-    /// per-structure backfill when a player joins and as a live broadcast when
-    /// one is placed. Layout: long id, byte kind, int tileX, int tileY.
+    /// A structure exists in the world; the client renders it. Sent to a player
+    /// once it first falls within their interest range — at join for whatever is
+    /// already nearby, as a live broadcast to nearby players when one is placed,
+    /// and on discovery as a player walks toward one placed while they were
+    /// elsewhere. Layout: long id, byte kind, int tileX, int tileY.
     /// </summary>
     StructurePlaced = 108,
 
@@ -153,9 +160,25 @@ public static class Tuning
     /// <summary>Radius, in chunks, of the area a client is kept informed about.</summary>
     public const int InterestRadiusChunks = 1;
 
+    /// <summary>
+    /// How far, in metres, a player is told about other players and structures.
+    /// Bounds per-tick broadcast size to the area around each player instead of
+    /// the whole world, per the interest-management invariant. See
+    /// <c>InterestRules</c> in sim-core.
+    /// </summary>
+    public const float InterestRadiusMetres = 100.0f;
+
     /// <summary>A full day/night cycle, in real seconds.</summary>
     public const int SecondsPerGameDay = 600;
 
     /// <summary>Heartbeat cadence for survival meters when nothing changed.</summary>
     public const int StatsHeartbeatTicks = TicksPerSecond * 2;
+
+    /// <summary>
+    /// How often each player is scanned for existing structures that just
+    /// entered their interest range. Once a second is frequent enough that
+    /// walking toward a structure never feels like a pop-in delay, without
+    /// re-scanning every structure against every player on every tick.
+    /// </summary>
+    public const int StructureDiscoveryTicks = TicksPerSecond;
 }

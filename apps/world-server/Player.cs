@@ -42,6 +42,21 @@ public sealed class Player
     public Dictionary<ItemId, int> Inventory { get; } = new();
     public bool InventoryDirty { get; set; }
 
+    /// <summary>
+    /// Remote player ids this player currently has state for. Diffed each tick
+    /// against who is actually in interest range so an id that drops out gets
+    /// an explicit <see cref="MessageId.PlayerLeft"/> instead of freezing in
+    /// place on the client forever.
+    /// </summary>
+    public HashSet<int> KnownPlayerIds { get; } = new();
+
+    /// <summary>
+    /// Structure ids already sent to this player, so the per-tick discovery
+    /// scan only sends a <see cref="MessageId.StructurePlaced"/> once per
+    /// structure as this player comes into range of it.
+    /// </summary>
+    public HashSet<long> KnownStructureIds { get; } = new();
+
     /// <summary>Authoritative survival meters. Spawns full; drains on the tick.</summary>
     public SurvivalRules.SurvivalState Survival { get; private set; } = SurvivalRules.SurvivalState.Full;
 
