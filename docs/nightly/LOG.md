@@ -70,9 +70,10 @@ rounding needs hysteresis — not implemented tonight, and worth adding if it's
 visible in practice: a player exactly on a chunk seam moving a few
 centimetres could toggle visibility rapidly).
 
-**Revert:** `git revert` this commit (`docs: nightly audit — interest-managed
-PlayerStates broadcast`) — it's a single, self-contained commit touching
-exactly the four files listed above plus these three docs.
+**Revert:** `git revert 7dff2891b058b9af3209c6e9ce7fed92a344f7b2` — a single,
+self-contained commit ("world-server: interest-manage the PlayerStates
+broadcast") touching exactly the four code files listed above plus these
+three docs.
 
 **Verified:**
 - `dotnet test tests/sim-core.tests` — installed .NET 8 and .NET 10 SDKs into
