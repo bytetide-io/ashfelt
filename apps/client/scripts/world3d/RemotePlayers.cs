@@ -14,16 +14,33 @@ public partial class RemotePlayers : Node3D
     private readonly Dictionary<int, Vector3> _targets = new();
     private readonly Dictionary<int, float> _yaws = new();
 
+    /// <summary>
+    /// Reconciles remote players to exactly this snapshot. The server now sends
+    /// only players within interest range, not every connected player, so a body
+    /// missing from <paramref name="states"/> means "no longer nearby" as often as
+    /// it means "disconnected" — either way it must disappear here too, or a
+    /// player who walked out of range would stand frozen forever as a ghost.
+    /// </summary>
     public void Apply(IReadOnlyList<PlayerState> states, int localId)
     {
+        _seen.Clear();
         foreach (var state in states)
         {
             if (state.Id == localId) continue;
+            _seen.Add(state.Id);
             _targets[state.Id] = state.Position;
             _yaws[state.Id] = state.Yaw;
             if (!_bodies.ContainsKey(state.Id)) CallDeferred(nameof(Spawn), state.Id, state.Position);
         }
+
+        _stale.Clear();
+        foreach (var id in _bodies.Keys)
+            if (!_seen.Contains(id)) _stale.Add(id);
+        foreach (var id in _stale) Remove(id);
     }
+
+    private readonly HashSet<int> _seen = new();
+    private readonly List<int> _stale = new();
 
     private void Spawn(int id, Vector3 at)
     {

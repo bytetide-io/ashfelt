@@ -145,4 +145,37 @@ public class WorldTests
         var coord = World.ChunkOf(wx, wy);
         Assert.Equal(new ChunkCoord(cx, cy), coord);
     }
+
+    [Theory]
+    [InlineData(0, 0, 0, 0, 1, true)]   // same chunk
+    [InlineData(0, 0, 1, 0, 1, true)]   // adjacent, within radius
+    [InlineData(0, 0, 1, 1, 1, true)]   // diagonal, within radius (Chebyshev)
+    [InlineData(0, 0, 2, 0, 1, false)]  // just past radius
+    [InlineData(0, 0, 5, 5, 1, false)]  // far away
+    [InlineData(-1, -1, 0, 0, 1, true)] // negative-coordinate chunks
+    public void ChunksWithinInterest_UsesChebyshevDistance(
+        int ax, int ay, int bx, int by, int radius, bool expected)
+    {
+        var a = new ChunkCoord(ax, ay);
+        var b = new ChunkCoord(bx, by);
+        Assert.Equal(expected, World.ChunksWithinInterest(a, b, radius));
+        // Symmetric: whichever chunk is "the viewer" should not change the answer.
+        Assert.Equal(expected, World.ChunksWithinInterest(b, a, radius));
+    }
+
+    [Fact]
+    public void IsWithinInterest_FollowsConfiguredRadiusInWorldSpace()
+    {
+        double metres = TerrainGenerator.TileMetres;
+        int chunkMetres = TerrainGenerator.ChunkSize * (int)metres;
+        var viewer = new Vec3(0, 0, 0);
+
+        // One chunk away: within the default interest radius.
+        var near = new Vec3(chunkMetres, 0, 0);
+        Assert.True(World.IsWithinInterest(viewer, near));
+
+        // Many chunks away: outside it.
+        var far = new Vec3(chunkMetres * 10, 0, 0);
+        Assert.False(World.IsWithinInterest(viewer, far));
+    }
 }

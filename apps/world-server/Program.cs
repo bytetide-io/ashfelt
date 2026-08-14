@@ -391,19 +391,32 @@ while (!shutdown.IsSet)
 
     if (players.Count > 0)
     {
-        writer.Reset();
-        writer.Put((byte)MessageId.PlayerStates);
-        writer.Put((byte)players.Count);
-        foreach (var player in players.Values)
+        // Each viewer gets only the players within interest range of them, not
+        // every connected player — otherwise per-tick bandwidth grows with the
+        // square of total population instead of local density. Personalised per
+        // viewer, so this cannot be a single shared Broadcast() payload.
+        var nearby = new List<Player>(players.Count);
+        foreach (var viewer in players.Values)
         {
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            writer.Put(player.Yaw);
+            nearby.Clear();
+            foreach (var other in players.Values)
+                if (World.IsWithinInterest(viewer.Position, other.Position))
+                    nearby.Add(other);
+
+            writer.Reset();
+            writer.Put((byte)MessageId.PlayerStates);
+            writer.Put((byte)nearby.Count);
+            foreach (var player in nearby)
+            {
+                writer.Put(player.Id);
+                writer.Put((float)player.Position.X);
+                writer.Put((float)player.Position.Y);
+                writer.Put((float)player.Position.Z);
+                writer.Put(player.Yaw);
+            }
+            // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
+            viewer.Peer.Send(writer, DeliveryMethod.Unreliable);
         }
-        // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
-        Broadcast(writer, method: DeliveryMethod.Unreliable);
 
         foreach (var player in players.Values)
         {

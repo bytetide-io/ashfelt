@@ -147,4 +147,27 @@ public sealed class World
     public static ChunkCoord ChunkOf(int wx, int wy) => new(
         (int)Math.Floor(wx / (double)TerrainGenerator.ChunkSize),
         (int)Math.Floor(wy / (double)TerrainGenerator.ChunkSize));
+
+    /// <summary>
+    /// True when chunk <paramref name="b"/> lies within <paramref name="radiusChunks"/>
+    /// of chunk <paramref name="a"/> (Chebyshev distance, so a square area rather than
+    /// a diamond — matching how a world-server keeps a client informed of only the
+    /// entities and chunks near them, per the interest-management invariant).
+    /// </summary>
+    public static bool ChunksWithinInterest(ChunkCoord a, ChunkCoord b, int radiusChunks) =>
+        Math.Max(Math.Abs(a.X - b.X), Math.Abs(a.Y - b.Y)) <= radiusChunks;
+
+    /// <summary>
+    /// True when <paramref name="other"/> is close enough to <paramref name="viewer"/>
+    /// to be kept informed about, per <see cref="Tuning.InterestRadiusChunks"/>. This is
+    /// what bounds broadcasts like <c>PlayerStates</c> to nearby players instead of
+    /// every connected player, so per-tick bandwidth stops growing with total
+    /// population and grows only with local density.
+    /// </summary>
+    public static bool IsWithinInterest(Vec3 viewer, Vec3 other)
+    {
+        var (vx, vy) = MovementRules.TileOf(viewer);
+        var (ox, oy) = MovementRules.TileOf(other);
+        return ChunksWithinInterest(ChunkOf(vx, vy), ChunkOf(ox, oy), Tuning.InterestRadiusChunks);
+    }
 }
