@@ -193,6 +193,20 @@ public sealed class Player
         return Position.HorizontalDistanceTo(centre) <= Tuning.ChopRangeMetres;
     }
 
+    /// <summary>Radius, in metres, within which another player is included in this
+    /// player's <see cref="Ashfall.Proto.MessageId.PlayerStates"/> snapshot — the
+    /// interest-management invariant applied to live position broadcast.</summary>
+    private const double InterestRadiusMetres =
+        TerrainGenerator.ChunkSize * TerrainGenerator.TileMetres * Tuning.InterestRadiusChunks;
+
+    /// <summary>
+    /// Whether <paramref name="other"/> belongs in this player's PlayerStates
+    /// snapshot: always true for self, otherwise horizontal distance only — the
+    /// same "ledge above" reasoning as <see cref="IsWithinReach"/>.
+    /// </summary>
+    public bool IsWithinInterestOf(Player other) =>
+        other.Id == Id || Position.HorizontalDistanceTo(other.Position) <= InterestRadiusMetres;
+
     public void ResetClock(double now) => LastAcceptedAt = now;
 
     /// <summary>Finds a walkable spawn point near the origin, in metres.</summary>

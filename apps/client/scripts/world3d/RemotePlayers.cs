@@ -14,15 +14,33 @@ public partial class RemotePlayers : Node3D
     private readonly Dictionary<int, Vector3> _targets = new();
     private readonly Dictionary<int, float> _yaws = new();
 
+    // Reused every Apply() to avoid allocating on this 15 Hz path.
+    private readonly HashSet<int> _seen = new();
+    private readonly List<int> _stale = new();
+
+    /// <summary>
+    /// The server now sends each player only the peers within its interest
+    /// radius (see Player.IsWithinInterestOf on the world-server), so a remote
+    /// player leaving that radius simply stops appearing here — there is no
+    /// separate PlayerLeft for "moved out of range". Anyone with a body who
+    /// isn't in this snapshot is removed below.
+    /// </summary>
     public void Apply(IReadOnlyList<PlayerState> states, int localId)
     {
+        _seen.Clear();
         foreach (var state in states)
         {
             if (state.Id == localId) continue;
+            _seen.Add(state.Id);
             _targets[state.Id] = state.Position;
             _yaws[state.Id] = state.Yaw;
             if (!_bodies.ContainsKey(state.Id)) CallDeferred(nameof(Spawn), state.Id, state.Position);
         }
+
+        _stale.Clear();
+        foreach (var id in _bodies.Keys)
+            if (!_seen.Contains(id)) _stale.Add(id);
+        foreach (var id in _stale) Remove(id);
     }
 
     private void Spawn(int id, Vector3 at)

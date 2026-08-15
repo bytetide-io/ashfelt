@@ -20,6 +20,7 @@ Console.WriteLine($"[world] seed={seed} restored {restored} diff(s), {structures
 
 var players = new Dictionary<NetPeer, Player>();
 var writer = new NetDataWriter();
+var nearby = new List<Player>();
 int nextPlayerId = 1;
 long tick = 0;
 
@@ -391,19 +392,7 @@ while (!shutdown.IsSet)
 
     if (players.Count > 0)
     {
-        writer.Reset();
-        writer.Put((byte)MessageId.PlayerStates);
-        writer.Put((byte)players.Count);
-        foreach (var player in players.Values)
-        {
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            writer.Put(player.Yaw);
-        }
-        // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
-        Broadcast(writer, method: DeliveryMethod.Unreliable);
+        SendPlayerStates(players.Values);
 
         foreach (var player in players.Values)
         {
@@ -438,6 +427,37 @@ void Broadcast(NetDataWriter data, NetPeer? exclude = null,
     foreach (var peer in players.Keys)
         if (peer != exclude)
             peer.Send(data, method);
+}
+
+// Each player gets their own PlayerStates snapshot, filtered to who is within
+// their interest radius (Player.IsWithinInterestOf) — broadcasting every
+// player's position to every other player regardless of distance is the
+// interest-management invariant this replaces: it is O(playerCount) traffic
+// per player per tick today, and was O(playerCount^2) total bandwidth with no
+// bound as a world fills up.
+void SendPlayerStates(IEnumerable<Player> roster)
+{
+    foreach (var recipient in roster)
+    {
+        nearby.Clear();
+        foreach (var other in roster)
+            if (recipient.IsWithinInterestOf(other)) nearby.Add(other);
+
+        writer.Reset();
+        writer.Put((byte)MessageId.PlayerStates);
+        writer.Put((byte)nearby.Count);
+        foreach (var other in nearby)
+        {
+            writer.Put(other.Id);
+            writer.Put((float)other.Position.X);
+            writer.Put((float)other.Position.Y);
+            writer.Put((float)other.Position.Z);
+            writer.Put(other.Yaw);
+        }
+
+        // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
+        recipient.Peer.Send(writer, DeliveryMethod.Unreliable);
+    }
 }
 
 // The survival meters plus time-of-day for one player. Sent both on the slow

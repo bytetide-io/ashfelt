@@ -109,7 +109,13 @@ bounds before sending, and a legitimate player is never corrected.
    reference it. Logic is never duplicated across the boundary — if the client
    needs to predict, it calls `sim-core`.
 5. **Interest management.** A world-server sends each client only the entities
-   and chunks near them.
+   and chunks near them. **Implemented for `PlayerStates`** (`Player.IsWithinInterestOf`,
+   world-server): each player's 15 Hz position snapshot is filtered to peers within
+   `InterestRadiusChunks` (64m) instead of broadcasting everyone to everyone, which
+   was unbounded O(playerCount²) bandwidth. **Not yet implemented** for
+   `StructurePlaced`/`TileChanged` (still a flat broadcast to every connected
+   player) or chunk delivery (client explicitly requests the chunks it wants, so
+   there is no unsolicited push to bound) — see `docs/nightly/BACKLOG.md`.
 
 ## Determinism
 
