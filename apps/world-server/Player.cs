@@ -28,6 +28,24 @@ public sealed class Player
     /// </summary>
     public Guid CharacterId { get; set; }
 
+    /// <summary>
+    /// True once the Hello handshake's gateway round trip (ticket claim,
+    /// character load) has completed and <see cref="Inventory"/> reflects the
+    /// stored character. Gameplay requests arriving before this point are
+    /// dropped: accepting them into a not-yet-loaded inventory would be
+    /// overwritten — silently losing the action — the moment the load lands.
+    /// </summary>
+    public bool Ready { get; set; }
+
+    /// <summary>
+    /// True while a release-to-voyage request is in flight (its own gateway
+    /// round trip). Gameplay requests are dropped for the same reason as
+    /// <see cref="Ready"/>: <see cref="ToCharacterState"/> is snapshotted
+    /// before the round trip, so anything the player does during it would be
+    /// silently discarded when the character actually leaves.
+    /// </summary>
+    public bool Releasing { get; set; }
+
     /// <summary>Last accepted position, in metres.</summary>
     public Vec3 Position { get; private set; }
 

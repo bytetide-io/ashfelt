@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Ashfall.Proto;
 using Ashfall.SimCore;
 using Ashfall.WorldServer;
@@ -22,6 +23,13 @@ var players = new Dictionary<NetPeer, Player>();
 var writer = new NetDataWriter();
 int nextPlayerId = 1;
 long tick = 0;
+
+// Gateway round trips (character load, save, voyage) run on background tasks
+// rather than blocking the network thread — see HandleHelloAsync and
+// HandleReleaseAsync. Their continuations touch player/world state, which is
+// not thread-safe, so they enqueue here and are drained on the main thread at
+// the top of every tick instead of running on the task's own thread.
+var mainThreadQueue = new ConcurrentQueue<Action>();
 
 var listener = new EventBasedNetListener();
 var server = new NetManager(listener) { UpdateTime = 15 };
@@ -92,62 +100,11 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
             string ticketText = reader.GetString();
 
-            // A voyage arrival carries a ticket: this server must claim ownership
-            // before it may load the character. A failed claim (expired, forged,
-            // already used) means the character is not ours to load — reject the
-            // join rather than risk two worlds owning one character. A normal join
-            // has an empty ticket and loads as before.
-            if (ticketText.Length > 0)
-            {
-                bool claimed = Guid.TryParse(ticketText, out var ticket)
-                    && gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId)
-                        .GetAwaiter().GetResult();
-                if (!claimed)
-                {
-                    Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
-                    peer.Disconnect();
-                    break;
-                }
-                Console.WriteLine($"[world] claimed voyaging character {player.CharacterId}");
-            }
-
-            // Load happens at Hello (not connect) because the UUID is only known
-            // now. Blocking the loop here is deliberate: joining is inherently a
-            // wait, and seeding synchronously keeps the inventory the tick loop
-            // reads free of cross-thread mutation. Saves, by contrast, are
-            // fire-and-forget so a leaving player never stalls the others.
-            try
-            {
-                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
-                if (character is not null) player.LoadCharacter(character);
-                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
-                                  (character is null ? "is new" : "loaded"));
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[world] character load failed for {player.CharacterId}: {ex.Message}");
-            }
-
-            writer.Reset();
-            writer.Put((byte)MessageId.Welcome);
-            writer.Put(ProtocolVersion.Current);
-            writer.Put(seed);
-            writer.Put(TerrainGenerator.ChunkSize);
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            player.InventoryDirty = true;
-
-            // Backfill the already-built world so a joining player sees every
-            // structure, not just the ones placed after they arrived.
-            foreach (var structure in world.Structures)
-            {
-                writer.Reset();
-                WriteStructurePlaced(writer, structure);
-                peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            }
+            // The ticket claim and character load are gateway round trips, run
+            // off the network thread so a slow or unreachable gateway stalls
+            // only this player's join, never the tick loop everyone else is
+            // relying on. See HandleHelloAsync.
+            _ = HandleHelloAsync(player, peer, ticketText);
             break;
         }
 
@@ -170,6 +127,8 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.ClientState:
         {
+            if (!player.Ready || player.Releasing) break;
+
             var reported = new Vec3(reader.GetFloat(), reader.GetFloat(), reader.GetFloat());
             float yaw = reader.GetFloat();
 
@@ -191,6 +150,8 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.ChopRequest:
         {
+            if (!player.Ready || player.Releasing) break;
+
             int tx = reader.GetInt(), ty = reader.GetInt();
             if (!player.IsWithinReach(tx, ty))
             {
@@ -243,6 +204,8 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.CraftRequest:
         {
+            if (!player.Ready || player.Releasing) break;
+
             var output = (ItemId)reader.GetByte();
             var craft = CraftingRules.Evaluate(player.Inventory, output);
             if (!craft.Allowed) break;
@@ -254,6 +217,8 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.EatRequest:
         {
+            if (!player.Ready || player.Releasing) break;
+
             var food = (ItemId)reader.GetByte();
             if (!player.Eat(food)) break;
 
@@ -267,6 +232,8 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.PlaceRequest:
         {
+            if (!player.Ready || player.Releasing) break;
+
             var kind = (ItemId)reader.GetByte();
             int tx = reader.GetInt(), ty = reader.GetInt();
 
@@ -299,57 +266,24 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.RequestRelease:
         {
+            if (!player.Ready || player.Releasing) break;
+
             string targetWorldId = reader.GetString();
 
-            void Deny(string reason)
+            if (player.CharacterId == Guid.Empty)
             {
-                Console.WriteLine($"[world] release denied for player {player.Id}: {reason}");
-                writer.Reset();
-                writer.Put((byte)MessageId.ReleaseDenied);
-                writer.Put(reason);
-                peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            }
-
-            if (player.CharacterId == Guid.Empty) { Deny("no character"); break; }
-
-            // Save synchronously first: the gateway must hold the authoritative
-            // state before any world can claim it, or a voyage could load stale
-            // inventory. Only then mint the ticket. Blocking the loop is deliberate
-            // — a release is a rare, deliberate act, not a per-tick path.
-            VoyageGrant? grant;
-            try
-            {
-                gateway.SaveCharacterAsync(player.CharacterId, player.ToCharacterState())
-                    .GetAwaiter().GetResult();
-                grant = gateway.RequestVoyageAsync(player.CharacterId, worldId, targetWorldId)
-                    .GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                Deny($"gateway unreachable: {ex.Message}");
+                DenyRelease(player, peer, "no character");
                 break;
             }
 
-            if (grant is null) { Deny($"target '{targetWorldId}' unavailable"); break; }
-
-            // Grant, then relinquish: tell the client where to go, then remove the
-            // entity so this server no longer owns it. The gateway already cleared
-            // ownership to in-transit, so the two states never contradict.
-            writer.Reset();
-            writer.Put((byte)MessageId.ReleaseGranted);
-            writer.Put(grant.TargetHost);
-            writer.Put(grant.TargetPort);
-            writer.Put(grant.Ticket.ToString());
-            peer.Send(writer, DeliveryMethod.ReliableOrdered);
-
-            players.Remove(peer);
-            Console.WriteLine($"[world] released player {player.Id} ({player.CharacterId}) " +
-                              $"to {targetWorldId} at {grant.TargetHost}:{grant.TargetPort}");
-
-            writer.Reset();
-            writer.Put((byte)MessageId.PlayerLeft);
-            writer.Put(player.Id);
-            Broadcast(writer, exclude: peer);
+            // Snapshot now, synchronously, so the save reflects exactly what the
+            // player held at the moment of the request — the gateway round trips
+            // below happen off the network thread, and Releasing (set here) locks
+            // the inventory against further gameplay for the same reason: nothing
+            // must change between this snapshot and the character actually leaving.
+            player.Releasing = true;
+            var snapshot = player.ToCharacterState();
+            _ = HandleReleaseAsync(player, peer, targetWorldId, snapshot);
             break;
         }
 
@@ -376,6 +310,11 @@ int tickMs = 1000 / Tuning.TicksPerSecond;
 
 while (!shutdown.IsSet)
 {
+    // Apply results from Hello/RequestRelease gateway round trips that finished
+    // since the last tick, before polling network events, so the tick that
+    // sends a Welcome or a ReleaseGranted also reflects a fresh player.Ready.
+    while (mainThreadQueue.TryDequeue(out var applyResult)) applyResult();
+
     server.PollEvents();
 
     tick++;
@@ -465,4 +404,146 @@ static void WriteStructurePlaced(NetDataWriter data, Structure structure)
     data.Put((byte)structure.Kind);
     data.Put(structure.TileX);
     data.Put(structure.TileY);
+}
+
+// Runs the Hello handshake's gateway round trips (ticket claim, character
+// load) on a background task, then enqueues the result for the main thread.
+// Everything here up to the first await is exactly what used to run inline;
+// the only change is that it no longer blocks the tick loop while it waits.
+async Task HandleHelloAsync(Player joining, NetPeer peer, string ticketText)
+{
+    // A voyage arrival carries a ticket: this server must claim ownership
+    // before it may load the character. A failed claim (expired, forged,
+    // already used) means the character is not ours to load — reject the
+    // join rather than risk two worlds owning one character. A normal join
+    // has an empty ticket and loads as before.
+    if (ticketText.Length > 0)
+    {
+        bool claimed = Guid.TryParse(ticketText, out var ticket)
+            && await gateway.ClaimVoyageAsync(joining.CharacterId, ticket, worldId);
+        if (!claimed)
+        {
+            mainThreadQueue.Enqueue(() =>
+            {
+                // The peer may have disconnected while the claim was in flight;
+                // players.Remove already dropped this entry in that case, so
+                // touching a stale peer here would be a bug, not a no-op.
+                if (!players.TryGetValue(peer, out var current) || current != joining) return;
+                Console.WriteLine($"[world] rejecting voyage for {joining.CharacterId}: bad ticket");
+                peer.Disconnect();
+            });
+            return;
+        }
+        Console.WriteLine($"[world] claimed voyaging character {joining.CharacterId}");
+    }
+
+    CharacterState? character = null;
+    try
+    {
+        character = await gateway.GetCharacterAsync(joining.CharacterId);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[world] character load failed for {joining.CharacterId}: {ex.Message}");
+    }
+
+    mainThreadQueue.Enqueue(() =>
+    {
+        if (!players.TryGetValue(peer, out var current) || current != joining) return;
+
+        if (character is not null) joining.LoadCharacter(character);
+        joining.Ready = true;
+        Console.WriteLine($"[world] player {joining.Id} character {joining.CharacterId} " +
+                          (character is null ? "is new" : "loaded"));
+
+        writer.Reset();
+        writer.Put((byte)MessageId.Welcome);
+        writer.Put(ProtocolVersion.Current);
+        writer.Put(seed);
+        writer.Put(TerrainGenerator.ChunkSize);
+        writer.Put(joining.Id);
+        writer.Put((float)joining.Position.X);
+        writer.Put((float)joining.Position.Y);
+        writer.Put((float)joining.Position.Z);
+        peer.Send(writer, DeliveryMethod.ReliableOrdered);
+        joining.InventoryDirty = true;
+
+        // Backfill the already-built world so a joining player sees every
+        // structure, not just the ones placed after they arrived.
+        foreach (var structure in world.Structures)
+        {
+            writer.Reset();
+            WriteStructurePlaced(writer, structure);
+            peer.Send(writer, DeliveryMethod.ReliableOrdered);
+        }
+    });
+}
+
+void DenyRelease(Player player, NetPeer peer, string reason)
+{
+    Console.WriteLine($"[world] release denied for player {player.Id}: {reason}");
+    writer.Reset();
+    writer.Put((byte)MessageId.ReleaseDenied);
+    writer.Put(reason);
+    peer.Send(writer, DeliveryMethod.ReliableOrdered);
+}
+
+// Runs a release-to-voyage request's gateway round trips (save, mint ticket)
+// on a background task, then enqueues the result for the main thread. The
+// player was already marked Releasing (and snapshotted) synchronously before
+// this was called, so no gameplay message can change their inventory while
+// this is in flight.
+async Task HandleReleaseAsync(Player leaving, NetPeer peer, string targetWorldId, CharacterState snapshot)
+{
+    void DenyAndUnlock(string reason) => mainThreadQueue.Enqueue(() =>
+    {
+        leaving.Releasing = false;
+        if (!players.TryGetValue(peer, out var current) || current != leaving) return;
+        DenyRelease(leaving, peer, reason);
+    });
+
+    // Save first: the gateway must hold the authoritative state before any
+    // world can claim it, or a voyage could load stale inventory. Only then
+    // mint the ticket.
+    VoyageGrant? grant;
+    try
+    {
+        await gateway.SaveCharacterAsync(leaving.CharacterId, snapshot);
+        grant = await gateway.RequestVoyageAsync(leaving.CharacterId, worldId, targetWorldId);
+    }
+    catch (Exception ex)
+    {
+        DenyAndUnlock($"gateway unreachable: {ex.Message}");
+        return;
+    }
+
+    if (grant is null)
+    {
+        DenyAndUnlock($"target '{targetWorldId}' unavailable");
+        return;
+    }
+
+    mainThreadQueue.Enqueue(() =>
+    {
+        if (!players.TryGetValue(peer, out var current) || current != leaving) return;
+
+        // Grant, then relinquish: tell the client where to go, then remove the
+        // entity so this server no longer owns it. The gateway already cleared
+        // ownership to in-transit, so the two states never contradict.
+        writer.Reset();
+        writer.Put((byte)MessageId.ReleaseGranted);
+        writer.Put(grant.TargetHost);
+        writer.Put(grant.TargetPort);
+        writer.Put(grant.Ticket.ToString());
+        peer.Send(writer, DeliveryMethod.ReliableOrdered);
+
+        players.Remove(peer);
+        Console.WriteLine($"[world] released player {leaving.Id} ({leaving.CharacterId}) " +
+                          $"to {targetWorldId} at {grant.TargetHost}:{grant.TargetPort}");
+
+        writer.Reset();
+        writer.Put((byte)MessageId.PlayerLeft);
+        writer.Put(leaving.Id);
+        Broadcast(writer, exclude: peer);
+    });
 }
