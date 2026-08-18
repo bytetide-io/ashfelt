@@ -94,6 +94,22 @@ nothing in the protocol has to change.
 The rules live in `sim-core` so the client can check itself against the same
 bounds before sending, and a legitimate player is never corrected.
 
+### Request pacing: reach is not enough
+
+**Decided.** A server-authoritative request (harvest, craft, place, eat) must
+be trusted for *timing*, not just for content. `IsWithinReach` alone answers
+"could this player legitimately act on this tile," never "how often could
+they legitimately act at all" — and a request handler that only checks the
+former can be spammed far faster than any real input gesture produces.
+
+`HarvestPacing` (`packages/sim-core/HarvestPacing.cs`) is the first instance
+of this: a strike is only accepted once `MinIntervalSeconds` has passed since
+the player's last accepted strike, budgeted by elapsed server time exactly
+like `MovementRules.Check` budgets distance. Any future request type that
+yields something (resources, crafted items, structures) on every accepted
+call should get the same treatment rather than relying on inventory limits
+alone to cap abuse.
+
 ## Invariants
 
 1. **Server-authoritative.** The client predicts movement for responsiveness.

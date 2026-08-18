@@ -37,6 +37,9 @@ public sealed class Player
     /// <summary>Server time of the last accepted position, for speed budgeting.</summary>
     public double LastAcceptedAt { get; private set; }
 
+    /// <summary>Server time of the last accepted harvest strike, for strike pacing.</summary>
+    public double LastHarvestAt { get; private set; } = double.NegativeInfinity;
+
     public int Rejections { get; private set; }
 
     public Dictionary<ItemId, int> Inventory { get; } = new();
@@ -192,6 +195,16 @@ public sealed class Player
         var centre = new Vec3((tileX + 0.5) * metres, Position.Y, (tileY + 0.5) * metres);
         return Position.HorizontalDistanceTo(centre) <= Tuning.ChopRangeMetres;
     }
+
+    /// <summary>
+    /// True once enough time has passed since the last accepted strike for
+    /// another one to be legitimate. Budgeted by elapsed server time, exactly
+    /// like <see cref="TryAccept"/> for movement, so spamming ChopRequest
+    /// cannot fell a node faster than a real tap cadence allows.
+    /// </summary>
+    public bool CanHarvestAt(double now) => HarvestPacing.IsAllowed(LastHarvestAt, now);
+
+    public void RecordHarvestAt(double now) => LastHarvestAt = now;
 
     public void ResetClock(double now) => LastAcceptedAt = now;
 

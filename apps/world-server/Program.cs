@@ -197,6 +197,15 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
                 Console.WriteLine($"[world] player {player.Id} chop out of range at ({tx},{ty})");
                 break;
             }
+            if (!player.CanHarvestAt(Now()))
+            {
+                // Reach only bounds *where* a strike can land; without a time
+                // budget too, a scripted client could spam requests and fell
+                // every node in reach in one network burst instead of one
+                // strike per tap.
+                Console.WriteLine($"[world] player {player.Id} chop throttled at ({tx},{ty})");
+                break;
+            }
 
             // A tool matching the node speeds the gather: resolve the node's
             // preferred class, then how good a tool of that class the player holds.
@@ -204,6 +213,7 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             int toolTier = player.ToolTierFor(preferredTool);
             var strike = world.TryHarvest(tx, ty, preferredTool, toolTier);
             if (!strike.Allowed) break;
+            player.RecordHarvestAt(Now());
 
             // Every strike drops resource; a tree just takes several before it
             // falls. Marking the inventory dirty lets the count tick up per hit.
