@@ -39,6 +39,8 @@ public sealed class Player
 
     public int Rejections { get; private set; }
 
+    private double _lastActionAt = double.NegativeInfinity;
+
     public Dictionary<ItemId, int> Inventory { get; } = new();
     public bool InventoryDirty { get; set; }
 
@@ -194,6 +196,19 @@ public sealed class Player
     }
 
     public void ResetClock(double now) => LastAcceptedAt = now;
+
+    /// <summary>
+    /// Gates ChopRequest/CraftRequest/PlaceRequest/EatRequest to at most one
+    /// accepted action per <see cref="ActionThrottle.MinIntervalSeconds"/>, so a
+    /// client cannot outrun the intended pace by spamming requests. Advances the
+    /// throttle clock only when the action is accepted.
+    /// </summary>
+    public bool TryBeginAction(double now)
+    {
+        if (!ActionThrottle.Ready(_lastActionAt, now)) return false;
+        _lastActionAt = now;
+        return true;
+    }
 
     /// <summary>Finds a walkable spawn point near the origin, in metres.</summary>
     public static Vec3 FindSpawn(World world, TerrainGenerator terrain)

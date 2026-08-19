@@ -191,6 +191,12 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.ChopRequest:
         {
+            if (!player.TryBeginAction(Now()))
+            {
+                Console.WriteLine($"[world] player {player.Id} chop throttled");
+                break;
+            }
+
             int tx = reader.GetInt(), ty = reader.GetInt();
             if (!player.IsWithinReach(tx, ty))
             {
@@ -243,6 +249,12 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.CraftRequest:
         {
+            if (!player.TryBeginAction(Now()))
+            {
+                Console.WriteLine($"[world] player {player.Id} craft throttled");
+                break;
+            }
+
             var output = (ItemId)reader.GetByte();
             var craft = CraftingRules.Evaluate(player.Inventory, output);
             if (!craft.Allowed) break;
@@ -254,6 +266,12 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.EatRequest:
         {
+            if (!player.TryBeginAction(Now()))
+            {
+                Console.WriteLine($"[world] player {player.Id} eat throttled");
+                break;
+            }
+
             var food = (ItemId)reader.GetByte();
             if (!player.Eat(food)) break;
 
@@ -267,6 +285,12 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 
         case MessageId.PlaceRequest:
         {
+            if (!player.TryBeginAction(Now()))
+            {
+                Console.WriteLine($"[world] player {player.Id} place throttled");
+                break;
+            }
+
             var kind = (ItemId)reader.GetByte();
             int tx = reader.GetInt(), ty = reader.GetInt();
 
