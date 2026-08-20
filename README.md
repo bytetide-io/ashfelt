@@ -122,6 +122,11 @@ mobile UI pass.
   `World.HasWarmthNear`). An empty warmth meter bleeds health on top of any
   starvation — so surviving the night means gathering by day and sheltering by
   a fire after dark.
+- **campfires must be tended**: a placed campfire starts unlit. Feeding it Wood
+  (`FeedFireRequest`, `sim-core/FireRules`) catches it alight for a few minutes
+  per log; only a *lit* fire counts for `HasWarmthNear`, so a fire left unfed
+  burns out and stops warming — the first system that makes players share and
+  ration a resource around one shared structure rather than each fending alone.
 
 **Design system + pixel-art pass (in progress)** — the client now dresses in the
 Ashfall design system (`scripts/ui/DesignSystem.cs`): the Ink/Ember palette,

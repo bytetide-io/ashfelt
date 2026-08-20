@@ -17,7 +17,16 @@ public sealed class World
     private readonly ConcurrentDictionary<(int X, int Y), TileType> _diffs = new();
     private readonly ConcurrentDictionary<(int X, int Y), int> _harvestStrikes = new();
     private readonly ConcurrentDictionary<(int X, int Y), Structure> _structures = new();
+
+    /// <summary>Fuel remaining, in ticks, for a warmth structure by <see cref="Structure.Id"/>.
+    /// A structure with no entry has never been fed and is unlit. Like
+    /// <see cref="_harvestStrikes"/>, this is transient — never persisted, so a
+    /// mid-burn fire restarts unlit after a server restart.</summary>
+    private readonly ConcurrentDictionary<long, int> _fuel = new();
+
     private long _nextStructureId = 1;
+
+    private static readonly IReadOnlyList<long> NoExtinguished = Array.Empty<long>();
 
     public World(uint seed) => _terrain = new TerrainGenerator(seed);
 
@@ -121,11 +130,56 @@ public sealed class World
     /// <summary>Removes the structure at a tile, if any. Returns whether one was there.</summary>
     public bool RemoveStructure(int tileX, int tileY) => _structures.TryRemove((tileX, tileY), out _);
 
+    /// <summary>The structure at a tile, if any.</summary>
+    public bool TryGetStructure(int tileX, int tileY, out Structure structure) =>
+        _structures.TryGetValue((tileX, tileY), out structure);
+
+    /// <summary>Whether a structure currently has fuel burning.</summary>
+    public bool IsLit(long structureId) => FireRules.IsLit(_fuel.GetValueOrDefault(structureId));
+
     /// <summary>
-    /// True when <paramref name="position"/> lies within the warmth radius of any
-    /// heat-providing structure (a lit campfire). Horizontal distance only, so a
-    /// ledge above the fire still counts — mirrors how harvest reach is measured.
-    /// This is what lets a player survive the night by sheltering near a fire.
+    /// Feeds <paramref name="woodSpent"/> Wood into <paramref name="structure"/>'s
+    /// fire. A structure with no warmth (e.g. a wall) cannot be fed and this is a
+    /// no-op. Returns whether the fire just caught alight (was unlit, now lit) —
+    /// the caller broadcasts <see cref="Proto.MessageId.StructureFuel"/> only on
+    /// that transition, never on every feed, so a fire already burning makes no
+    /// extra noise on the wire.
+    /// </summary>
+    public bool FeedFuel(Structure structure, int woodSpent)
+    {
+        if (!ItemCatalog.TryGet(structure.Kind, out var def) || def.WarmthRadiusMetres <= 0) return false;
+
+        bool wasLit = IsLit(structure.Id);
+        _fuel[structure.Id] = FireRules.Feed(_fuel.GetValueOrDefault(structure.Id), woodSpent);
+        return !wasLit;
+    }
+
+    /// <summary>
+    /// Burns every lit structure's fuel down by one tick. Returns the ids of any
+    /// that went out this tick (fuel reached zero), so the caller can broadcast
+    /// the transition — never called for a structure that never had fuel, so an
+    /// unfed campfire costs nothing every tick.
+    /// </summary>
+    public IReadOnlyList<long> AdvanceFuel()
+    {
+        List<long>? extinguished = null;
+        foreach (var (id, fuel) in _fuel)
+        {
+            int next = FireRules.Advance(fuel);
+            if (next > 0) { _fuel[id] = next; continue; }
+
+            _fuel.TryRemove(id, out _);
+            (extinguished ??= new List<long>()).Add(id);
+        }
+        return (IReadOnlyList<long>?)extinguished ?? NoExtinguished;
+    }
+
+    /// <summary>
+    /// True when <paramref name="position"/> lies within the warmth radius of a
+    /// heat-providing structure that is currently lit. Horizontal distance only,
+    /// so a ledge above the fire still counts — mirrors how harvest reach is
+    /// measured. This is what lets a player survive the night by sheltering near
+    /// a fire — and what makes an unfed one stop counting.
     /// </summary>
     public bool HasWarmthNear(Vec3 position)
     {
@@ -133,6 +187,7 @@ public sealed class World
         foreach (var structure in _structures.Values)
         {
             if (!ItemCatalog.TryGet(structure.Kind, out var def) || def.WarmthRadiusMetres <= 0) continue;
+            if (!IsLit(structure.Id)) continue;
 
             var centre = new Vec3((structure.TileX + 0.5) * metres, position.Y, (structure.TileY + 0.5) * metres);
             if (position.HorizontalDistanceTo(centre) <= def.WarmthRadiusMetres) return true;

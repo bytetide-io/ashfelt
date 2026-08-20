@@ -41,6 +41,9 @@ public partial class WorldConnection : Node
     /// <summary>(structure id, kind, tileX, tileY) — a structure to render.</summary>
     public event Action<long, ItemId, int, int>? StructurePlaced;
 
+    /// <summary>(structure id, lit) — a warmth structure caught alight or went out.</summary>
+    public event Action<long, bool>? StructureFuelChanged;
+
     /// <summary>(hunger, stamina, health, warmth) in display points, plus time-of-day in [0,1).</summary>
     public event Action<int, int, int, int, float>? StatsUpdated;
 
@@ -177,6 +180,21 @@ public partial class WorldConnection : Node
         _writer.Reset();
         _writer.Put((byte)MessageId.EatRequest);
         _writer.Put((byte)food);
+        _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
+    }
+
+    /// <summary>
+    /// Feed one held Wood into the warmth structure at a world tile. The server
+    /// authorises reach, the target and the Wood cost; a fire that catches
+    /// alight (or burns out later) comes back as <see cref="StructureFuelChanged"/>.
+    /// </summary>
+    public void SendFeedFire(int tileX, int tileY)
+    {
+        if (!IsLinked) return;
+        _writer.Reset();
+        _writer.Put((byte)MessageId.FeedFireRequest);
+        _writer.Put(tileX);
+        _writer.Put(tileY);
         _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
     }
 
@@ -388,6 +406,14 @@ public partial class WorldConnection : Node
                 var kind = (ItemId)reader.GetByte();
                 int tx = reader.GetInt(), ty = reader.GetInt();
                 StructurePlaced?.Invoke(structureId, kind, tx, ty);
+                break;
+            }
+
+            case MessageId.StructureFuel:
+            {
+                long structureId = reader.GetLong();
+                bool lit = reader.GetBool();
+                StructureFuelChanged?.Invoke(structureId, lit);
                 break;
             }
 

@@ -64,11 +64,16 @@ The goal: a player can perceive a threat, act against it, and succeed. This is
 the minimum that turns the demo into a game.
 
 > **Progress.** Food & eating ✅ (BerryBush → Berry → EatRequest), functional
-> campfire as a warmth source ✅, night pressure ✅ (a warmth meter that drains
-> when exposed after dark and bleeds health at zero), and tools boosting harvest
-> ✅ (a tool matching a node's `PreferredTool` adds its tier to the per-strike
-> yield *and* shaves a strike off felling it; bare hands still work so tools stay
-> bootstrappable). **Remaining:** the campfire as
+> campfire as a warmth source ✅, **tended** ✅ — a placed campfire starts unlit
+> and must be fed Wood (`FeedFireRequest`) to catch alight; it burns down over a
+> few minutes per log and stops warming once its fuel runs out
+> (`FireRules`/`World.AdvanceFuel`), so "build a fire" became "keep a fire," the
+> first real reason for players to share and ration a resource around one spot —
+> night pressure ✅ (a warmth meter that drains when exposed after dark and
+> bleeds health at zero, now gated on the fire actually being lit), and tools
+> boosting harvest ✅ (a tool matching a node's `PreferredTool` adds its tier to
+> the per-strike yield *and* shaves a strike off felling it; bare hands still
+> work so tools stay bootstrappable). **Remaining:** the campfire as
 > a *cooking* station (needs a raw→cooked food pair) — a natural bridge into
 > Phase B/C, since raw meat arrives with creatures.
 
@@ -77,7 +82,8 @@ the minimum that turns the demo into a game.
   `EatRequest`. Food value is a per-item data field (see §3.1), not a switch.
 - **Functional campfire.** Placing/lighting a campfire creates a warmth + light
   aura and acts as a **cooking station**. This is what makes night survivable
-  and gives building a point.
+  and gives building a point. Tending is done — lit/unlit and fuel — cooking
+  is the remaining half.
 - **Night as pressure.** At night, add a cold/exposure drain unless near a
   warmth source (campfire). Day/night now drives behaviour: gather by day,
   hunker by night. Reuses the existing `WorldClock` broadcast.

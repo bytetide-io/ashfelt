@@ -86,6 +86,9 @@ public partial class SurvivalHud : Control
     public VirtualJoystick MoveStick => _joystick;
     public event System.Action? JumpPressed;
     public event System.Action<ItemId>? PlaceRequested;
+    public event System.Action? FeedFirePressed;
+
+    private Button _feedButton = null!;
 
     /// <summary>One survival meter: an icon-labelled striped bar plus a live numeral.</summary>
     private sealed class Meter
@@ -119,6 +122,7 @@ public partial class SurvivalHud : Control
         BuildActionSheet();
         BuildHotbar();
         BuildGatherPrompt();
+        BuildFeedButton();
         BuildTouchControls();
         RefreshActionAvailability();
     }
@@ -377,6 +381,45 @@ public partial class SurvivalHud : Control
     }
 
     public void HideGatherPrompt() => _gatherPrompt.Visible = false;
+
+    // ---- "Feed fire" button (floats above the hotbar) ------------------
+
+    /// <summary>
+    /// A fixed-position button rather than a floating reticle: it sits above the
+    /// hotbar so it never competes with the "tap to gather" gesture over the same
+    /// patch of screen — standing next to both a tree and a campfire should never
+    /// leave "which one did that tap mean?"
+    /// </summary>
+    private void BuildFeedButton()
+    {
+        _feedButton = new Button
+        {
+            Text = "FEED FIRE",
+            CustomMinimumSize = new Vector2(0, HotbarSlot - 12),
+            Visible = false,
+        };
+        _feedButton.SetAnchorsPreset(LayoutPreset.CenterBottom);
+        _feedButton.GrowHorizontal = GrowDirection.Both;
+        _feedButton.GrowVertical = GrowDirection.Begin;
+        _feedButton.OffsetBottom = -(HotbarSlot + DesignSystem.Space * 2);
+        _feedButton.AddThemeFontSizeOverride("font_size", DesignSystem.LabelSize);
+        if (DesignSystem.Display is { } font) _feedButton.AddThemeFontOverride("font", font);
+        DesignSystem.StyleButton(_feedButton, DesignSystem.EmberButton(), DesignSystem.EmberButtonPressed(), DesignSystem.OnEmber);
+        _feedButton.Pressed += () => FeedFirePressed?.Invoke();
+        _hudLayer.AddChild(_feedButton);
+    }
+
+    /// <summary>Shown while a warmth structure is in reach; dimmed (but still
+    /// tappable, same as any other request the server may refuse) when the player
+    /// is not carrying the Wood a feed costs.</summary>
+    public void ShowFeedPrompt()
+    {
+        if (_toggle.ButtonPressed) { _feedButton.Visible = false; return; }
+        _feedButton.Visible = true;
+        _feedButton.Disabled = _inventory.GetValueOrDefault(ItemId.Wood) <= 0;
+    }
+
+    public void HideFeedPrompt() => _feedButton.Visible = false;
 
     // ---- Slide-out action sheet ---------------------------------------
 

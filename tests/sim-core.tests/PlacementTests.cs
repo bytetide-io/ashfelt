@@ -105,4 +105,75 @@ public class PlacementTests
         Assert.Equal(0, world.StructureCount);
         Assert.True(world.TryPlace(x, y, ItemId.Campfire).Allowed);
     }
+
+    [Fact]
+    public void FreshlyPlacedCampfire_StartsUnlit()
+    {
+        var world = new World(1337);
+        var (x, y) = FindTile(world, TileType.Grass);
+        var campfire = world.TryPlace(x, y, ItemId.Campfire).Structure;
+
+        Assert.False(world.IsLit(campfire.Id));
+    }
+
+    [Fact]
+    public void FeedingWood_CatchesTheFireAlight_ButOnlyReportsTheTransition()
+    {
+        var world = new World(1337);
+        var (x, y) = FindTile(world, TileType.Grass);
+        var campfire = world.TryPlace(x, y, ItemId.Campfire).Structure;
+
+        Assert.True(world.FeedFuel(campfire, woodSpent: 1)); // unlit -> lit
+        Assert.True(world.IsLit(campfire.Id));
+
+        Assert.False(world.FeedFuel(campfire, woodSpent: 1)); // already lit, just tops up
+        Assert.True(world.IsLit(campfire.Id));
+    }
+
+    [Fact]
+    public void FeedingAWall_HasNoEffect()
+    {
+        var world = new World(1337);
+        var (x, y) = FindTile(world, TileType.Grass);
+        var wall = world.TryPlace(x, y, ItemId.Wall).Structure;
+
+        Assert.False(world.FeedFuel(wall, woodSpent: 1));
+        Assert.False(world.IsLit(wall.Id));
+    }
+
+    [Fact]
+    public void AdvancingFuelToZero_ExtinguishesAndStopsProvidingWarmth()
+    {
+        var world = new World(1337);
+        var (x, y) = FindTile(world, TileType.Grass);
+        var campfire = world.TryPlace(x, y, ItemId.Campfire).Structure;
+        world.FeedFuel(campfire, woodSpent: 1);
+
+        double metres = TerrainGenerator.TileMetres;
+        var centre = new Vec3((x + 0.5) * metres, 0, (y + 0.5) * metres);
+        Assert.True(world.HasWarmthNear(centre));
+
+        int ticks = 0;
+        IReadOnlyList<long> extinguished = System.Array.Empty<long>();
+        while (extinguished.Count == 0 && ticks < FireRules.FuelTicksPerWood + 1)
+        {
+            extinguished = world.AdvanceFuel();
+            ticks++;
+        }
+
+        Assert.Equal(FireRules.FuelTicksPerWood, ticks);
+        Assert.Equal(campfire.Id, Assert.Single(extinguished));
+        Assert.False(world.IsLit(campfire.Id));
+        Assert.False(world.HasWarmthNear(centre));
+    }
+
+    [Fact]
+    public void AdvancingFuel_OnAnUnfedWorld_ReportsNothing()
+    {
+        var world = new World(1337);
+        var (x, y) = FindTile(world, TileType.Grass);
+        world.TryPlace(x, y, ItemId.Campfire);
+
+        Assert.Empty(world.AdvanceFuel());
+    }
 }

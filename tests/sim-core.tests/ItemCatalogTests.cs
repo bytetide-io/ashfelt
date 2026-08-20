@@ -102,7 +102,9 @@ public class ItemCatalogTests
         Assert.False(ItemCatalog.ProvidesWarmth(ItemId.Wall));
 
         var world = new World(1337u);
-        world.LoadStructure(new Structure(1, TileX: 10, TileY: 10, ItemId.Campfire));
+        var structure = new Structure(1, TileX: 10, TileY: 10, ItemId.Campfire);
+        world.LoadStructure(structure);
+        world.FeedFuel(structure, woodSpent: 1); // a placed campfire starts unlit
 
         double metres = TerrainGenerator.TileMetres;
         double radius = ItemCatalog.Of(ItemId.Campfire).WarmthRadiusMetres;

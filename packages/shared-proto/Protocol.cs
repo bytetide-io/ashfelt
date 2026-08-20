@@ -60,6 +60,16 @@ public enum MessageId : byte
     /// </summary>
     EatRequest = 8,
 
+    /// <summary>
+    /// Ask to feed one Wood into the warmth-providing structure at a world
+    /// tile. Layout: int tileX, int tileY. The server checks reach, that a
+    /// warmth structure (a campfire) sits there, and that the player holds
+    /// Wood; on success it consumes one Wood and adds fuel via
+    /// <c>World.FeedFuel</c>. A structure that has no warmth (a wall) or a
+    /// player with no Wood is ignored, same as any other refused request.
+    /// </summary>
+    FeedFireRequest = 9,
+
     // server -> client
     Welcome = 100,
     ChunkData = 101,
@@ -74,6 +84,17 @@ public enum MessageId : byte
     /// partial progress is transient server state, never a persisted diff.
     /// </summary>
     HarvestProgress = 111,
+
+    /// <summary>
+    /// A warmth structure's lit state changed. Layout: long structureId, byte
+    /// lit (0/1). Sent on the transition only — a fire catching alight when
+    /// fed, or going out when its fuel reaches zero — never per tick, and
+    /// backfilled (if lit) alongside <see cref="StructurePlaced"/> when a
+    /// player joins. Purely presentational: the server is the only place fuel
+    /// is tracked, and it is never persisted — a mid-burn fire restarts unlit
+    /// after a server restart, exactly like a half-chopped tree.
+    /// </summary>
+    StructureFuel = 112,
 
     /// <summary>A tile diff was applied; clients overlay it on generated terrain.</summary>
     TileChanged = 104,
@@ -119,7 +140,7 @@ public enum MessageId : byte
 public static class ProtocolVersion
 {
     /// <summary>Bumped whenever message layout changes. Mismatched peers are rejected.</summary>
-    public const int Current = 10;
+    public const int Current = 11;
 }
 
 /// <summary>Item kinds. Values are wire-stable — append only, never renumber.</summary>

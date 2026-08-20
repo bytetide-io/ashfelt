@@ -54,6 +54,10 @@ public partial class World3D : Node3D
     private readonly Dictionary<long, Node3D> _structures = new();
     private Node3D _structureRoot = null!;
 
+    /// <summary>Tile and kind for every placed structure, keyed by server id — the
+    /// rendered node alone doesn't carry enough to resolve a feed target from.</summary>
+    private readonly Dictionary<long, (int TileX, int TileY, ItemId Kind)> _structureInfo = new();
+
     private WorldConnection _connection = null!;
     private PlayerBody _player = null!;
     private Label _status = null!;
@@ -90,6 +94,7 @@ public partial class World3D : Node3D
         _hud.PlaceRequested += OnPlaceRequested;
         _player.MoveStick = _hud.MoveStick;
         _hud.JumpPressed += _player.QueueJump;
+        _hud.FeedFirePressed += OnFeedFireRequested;
 
         // Nothing is generated until the server says which world this is: the
         // seed is the server's to decide, exactly as in the 2D client.
@@ -104,6 +109,8 @@ public partial class World3D : Node3D
             CallDeferred(nameof(SyncClock), timeOfDay);
         _connection.StructurePlaced += (id, kind, tx, ty) =>
             CallDeferred(nameof(OnStructurePlaced), id, (int)kind, tx, ty);
+        _connection.StructureFuelChanged += (id, lit) =>
+            CallDeferred(nameof(OnStructureFuel), id, lit);
         _connection.TileChanged += (tx, ty, tile) =>
             CallDeferred(nameof(OnTileChanged), tx, ty, (int)tile);
         _connection.HarvestProgress += (tx, ty, left, total) =>
@@ -159,6 +166,7 @@ public partial class World3D : Node3D
         _foliageByTile.Clear();
         _tileDiffs.Clear();
         _structures.Clear();
+        _structureInfo.Clear();
         _remotes.Clear();
     }
 
@@ -491,6 +499,7 @@ public partial class World3D : Node3D
     public override void _PhysicsProcess(double delta)
     {
         UpdateGatherPrompt();
+        UpdateFeedTarget();
 
         if (!_harvestQueued) return;
         _harvestQueued = false;
@@ -498,6 +507,46 @@ public partial class World3D : Node3D
         // Input is a request, never a state change: the tile does not change here.
         // The server's TileChanged / HarvestProgress is what wears down the node.
         if (_gatherTarget is { } target) _connection.SendChop(target.X, target.Y);
+    }
+
+    /// <summary>The nearest warmth structure in reach, resolved each physics frame
+    /// so the FEED FIRE button only appears — and only spends Wood — where a fire
+    /// actually is. A separate button from the gather tap: standing next to both a
+    /// tree and a campfire should never leave "which one did that tap mean?"</summary>
+    private long? _feedTarget;
+
+    private void UpdateFeedTarget()
+    {
+        if (!_built) { _feedTarget = null; _hud.HideFeedPrompt(); return; }
+
+        double metres = TerrainGenerator.TileMetres;
+        float range = (float)Proto.Tuning.ChopRangeMetres;
+        Vector3 player = _player.GlobalPosition;
+
+        float bestSq = range * range;
+        long? best = null;
+        foreach (var (id, info) in _structureInfo)
+        {
+            if (!ItemCatalog.ProvidesWarmth(info.Kind)) continue;
+
+            float x = (float)((info.TileX + 0.5) * metres), z = (float)((info.TileY + 0.5) * metres);
+            float dSq = new Vector2(player.X - x, player.Z - z).LengthSquared();
+            if (dSq > bestSq) continue;
+
+            bestSq = dSq;
+            best = id;
+        }
+
+        _feedTarget = best;
+        if (best is null) _hud.HideFeedPrompt(); else _hud.ShowFeedPrompt();
+    }
+
+    /// <summary>The HUD's FEED FIRE button was pressed: ask the server to spend one
+    /// held Wood on whichever warmth structure is currently in reach.</summary>
+    private void OnFeedFireRequested()
+    {
+        if (_feedTarget is { } id && _structureInfo.TryGetValue(id, out var info))
+            _connection.SendFeedFire(info.TileX, info.TileY);
     }
 
     /// <summary>
@@ -644,6 +693,18 @@ public partial class World3D : Node3D
         node.Position = new Vector3(x, y, z);
         _structureRoot.AddChild(node);
         _structures[id] = node;
+        _structureInfo[id] = (tileX, tileY, (ItemId)kind);
+    }
+
+    /// <summary>A warmth structure caught alight or burned out. Presentation only —
+    /// the server is the only place fuel is tracked.</summary>
+    private void OnStructureFuel(long id, bool lit)
+    {
+        if (!_structures.TryGetValue(id, out var node)) return;
+
+        if (node.GetNodeOrNull<OmniLight3D>(CampfireLightName) is { } light) light.Visible = lit;
+        if (node.GetNodeOrNull<MeshInstance3D>(CampfireFlameName) is { MaterialOverride: StandardMaterial3D flame })
+            flame.EmissionEnabled = lit;
     }
 
     /// <summary>A box for a Wall, a small lit shape for a Campfire.</summary>
@@ -660,17 +721,28 @@ public partial class World3D : Node3D
         MaterialOverride = FlatMaterial(WallColour),
     };
 
+    /// <summary>Names for the two child nodes <see cref="OnStructureFuel"/> looks up
+    /// to toggle a campfire between lit and unlit; nothing else keys off these.</summary>
+    private const string CampfireFlameName = "Flame";
+    private const string CampfireLightName = "Light";
+
+    /// <summary>
+    /// A campfire starts unlit — feeding it Wood (<see cref="OnStructureFuel"/>) is
+    /// what turns the emission and light on, mirroring that a freshly placed one
+    /// has no fuel yet.
+    /// </summary>
     private static Node3D BuildCampfire()
     {
         var root = new Node3D();
         root.AddChild(new MeshInstance3D
         {
+            Name = CampfireFlameName,
             Mesh = new CylinderMesh { TopRadius = 0.5f, BottomRadius = 0.6f, Height = 0.5f, RadialSegments = 8 },
             Position = Vector3.Up * 0.25f,
             MaterialOverride = new StandardMaterial3D
             {
                 AlbedoColor = CampfireColour,
-                EmissionEnabled = true,
+                EmissionEnabled = false,
                 Emission = new Color("ff7a1a"),
                 EmissionEnergyMultiplier = 2.0f,
                 Roughness = 1.0f,
@@ -680,10 +752,12 @@ public partial class World3D : Node3D
         });
         root.AddChild(new OmniLight3D
         {
+            Name = CampfireLightName,
             Position = Vector3.Up * 0.8f,
             LightColor = new Color("ff9a3c"),
             LightEnergy = 2.2f,
             OmniRange = 8f,
+            Visible = false,
         });
         return root;
     }

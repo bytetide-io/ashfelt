@@ -141,11 +141,17 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             player.InventoryDirty = true;
 
             // Backfill the already-built world so a joining player sees every
-            // structure, not just the ones placed after they arrived.
+            // structure, not just the ones placed after they arrived — and any
+            // fire already burning, not just the ones fed after they arrived.
             foreach (var structure in world.Structures)
             {
                 writer.Reset();
                 WriteStructurePlaced(writer, structure);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+
+                if (!world.IsLit(structure.Id)) continue;
+                writer.Reset();
+                WriteStructureFuel(writer, structure.Id, lit: true);
                 peer.Send(writer, DeliveryMethod.ReliableOrdered);
             }
             break;
@@ -297,6 +303,38 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             break;
         }
 
+        case MessageId.FeedFireRequest:
+        {
+            int tx = reader.GetInt(), ty = reader.GetInt();
+            if (!player.IsWithinReach(tx, ty))
+            {
+                Console.WriteLine($"[world] player {player.Id} feed out of range at ({tx},{ty})");
+                break;
+            }
+            if (!world.TryGetStructure(tx, ty, out var structure) || !ItemCatalog.ProvidesWarmth(structure.Kind))
+            {
+                Console.WriteLine($"[world] player {player.Id} nothing to feed at ({tx},{ty})");
+                break;
+            }
+            if (!player.Has(ItemId.Wood))
+            {
+                Console.WriteLine($"[world] player {player.Id} lacks wood to feed the fire at ({tx},{ty})");
+                break;
+            }
+
+            player.ConsumeOne(ItemId.Wood);
+            bool caughtAlight = world.FeedFuel(structure, woodSpent: 1);
+            if (caughtAlight)
+            {
+                writer.Reset();
+                WriteStructureFuel(writer, structure.Id, lit: true);
+                Broadcast(writer);
+            }
+
+            Console.WriteLine($"[world] player {player.Id} fed the fire at ({tx},{ty})");
+            break;
+        }
+
         case MessageId.RequestRelease:
         {
             string targetWorldId = reader.GetString();
@@ -389,6 +427,16 @@ while (!shutdown.IsSet)
         player.AdvanceSurvival(1, warm);
     }
 
+    // Burns down regardless of whether anyone is online to watch — an
+    // unattended fire goes out on its own schedule, not just when a player is
+    // nearby to notice.
+    foreach (long extinguishedId in world.AdvanceFuel())
+    {
+        writer.Reset();
+        WriteStructureFuel(writer, extinguishedId, lit: false);
+        Broadcast(writer);
+    }
+
     if (players.Count > 0)
     {
         writer.Reset();
@@ -465,4 +513,11 @@ static void WriteStructurePlaced(NetDataWriter data, Structure structure)
     data.Put((byte)structure.Kind);
     data.Put(structure.TileX);
     data.Put(structure.TileY);
+}
+
+static void WriteStructureFuel(NetDataWriter data, long structureId, bool lit)
+{
+    data.Put((byte)MessageId.StructureFuel);
+    data.Put(structureId);
+    data.Put(lit);
 }
