@@ -11,11 +11,18 @@ namespace Ashfall.WorldServer;
 /// </summary>
 public sealed class GatewayClient
 {
+    /// <summary>
+    /// Upper bound on a single gateway round trip. The tick loop never blocks on
+    /// these calls (see Program.cs), but an unbounded default (100s) would still
+    /// let a hung gateway pin a thread-pool worker per join indefinitely.
+    /// </summary>
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
+
     private readonly HttpClient _http;
 
     public GatewayClient(string baseUrl)
     {
-        _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        _http = new HttpClient { BaseAddress = new Uri(baseUrl), Timeout = RequestTimeout };
     }
 
     /// <summary>

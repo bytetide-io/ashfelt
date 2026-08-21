@@ -5,6 +5,172 @@ session — see the routine's prompt for the required shape.
 
 ---
 
+## 2026-08-21 — AUDIT-ONLY (completed a backlogged fix, not a new feature)
+
+**Chose:** Made the world-server's gateway calls (character claim on join,
+character save + voyage mint on release) non-blocking, so they no longer
+freeze the single-threaded tick loop for every connected player.
+
+**Because:** This is the finding the 2026-07-24 session logged to
+`BACKLOG.md` and explicitly deferred ("World-server blocks its single
+packet/tick thread on gateway HTTP calls", scored **Severity 4 × Blast
+radius 5 = 20**, tied with that night's ownership fix but judged to need its
+own session rather than being squeezed in alongside another structural
+change). Nothing about the finding has changed since — `Hello` and
+`RequestRelease` in `apps/world-server/Program.cs` still called the
+gateway's REST API via `.GetAwaiter().GetResult()` directly inside the
+single-threaded UDP event loop, so every player's movement, harvesting and
+building froze for the duration of each HTTP round trip, on every join and
+every voyage. `GatewayClient`'s `HttpClient` had no explicit timeout, so a
+slow-but-not-down gateway could freeze the whole world for up to the BCL
+default of 100 seconds; a hung gateway, indefinitely. Re-scored against
+today's code: unchanged at 20 (multiplayer-correctness ≥9 alone means fix
+tonight, skip Phase 2 — same rule the 2026-07-24 session applied).
+
+Worth being explicit about process, since this backlog item sat for four
+weeks of intervening feature work (blueprint building, roof shelter, the
+character-ownership claim fix) between when it was logged and when it was
+picked up: this session started by re-auditing the code cold, arrived at
+the *same* finding independently (score 25 by this session's own
+math — 5×5 rather than 4×5, immaterial, same conclusion), and only
+discovered mid-session, while investigating why a first draft PR based on a
+stale branch conflicted with `main`, that it was already a known, scored,
+written-up backlog item from a prior night. That's a process gap worth
+naming: this session's branch was created without fetching latest `main`
+first, so the audit ran against a codebase roughly four weeks and 28
+commits stale — including the entirety of blueprint building, the roof/
+shelter mechanic, and the prior nightly session's ownership-claim fix. The
+first draft of this fix was written against that stale code and had to be
+discarded and rewritten against current `main` once the gap was caught (see
+git history on this session's branch — the branch was hard-reset onto
+`origin/main` mid-session, nothing from the stale draft survived). **Future
+nightly sessions should `git fetch origin main` and branch from
+`origin/main`'s tip before Phase 1, not just from whatever the workflow
+handed them.**
+
+**Changed:**
+- `apps/world-server/GatewayClient.cs` — explicit 8s `HttpClient.Timeout`
+  (defense in depth; the real fix is below, but a call kicked off from a
+  background continuation should never be allowed to hang a thread-pool
+  worker forever either).
+- `apps/world-server/Program.cs` — `Hello` and `RequestRelease` no longer
+  block the event handler. Each kicks off an `async Task` local function
+  (`HandleHelloAsync` / `HandleReleaseAsync`) that awaits the gateway calls
+  off-thread and lands its result through a new `ConcurrentQueue<Action>`
+  (`pending`), drained once per tick on the main loop — the only place now
+  allowed to touch `writer`, `players`, `buildSites`, or a `NetPeer`. This is
+  almost exactly the fix the 2026-07-24 backlog entry sketched ("kick off
+  the HTTP call as a real Task, park the connecting peer in a pending state
+  that only skips gameplay messages, drain completions from a thread-safe
+  queue on the next tick"). It also mirrors the fire-and-forget discipline
+  already used for Postgres writes (`_ = store.SaveDiffAsync(...)`), applied
+  now to the gateway calls that previously blocked.
+- `apps/world-server/Player.cs` — added `Ready` (true once the async Hello/
+  claim completes) and `Leaving` (true while a release is in flight) flags.
+- Every message type except `Hello` is now rejected until `player.Ready`.
+  Necessary once the claim is async: previously it resolved synchronously in
+  effectively zero time, so a client's next message could never race it.
+  Now there's a real (if usually small) window where a `ChopRequest` or
+  `BuildRequest` could otherwise land on a still-default inventory/build
+  state the async `LoadCharacter` call is about to overwrite — this closes
+  that window rather than opening it. The pre-existing synchronous duplicate-
+  connection guard (same `CharacterId` connecting twice) still runs before
+  any claim starts, so it isn't weakened by any of this — see the comment at
+  its call site.
+- A duplicate `RequestRelease` while one is already in flight is now ignored
+  (`player.Leaving` guard) instead of racing a second save/mint.
+- The disconnect handler's own fire-and-forget character save is skipped
+  while `player.Leaving` is true, since `HandleReleaseAsync` already saves
+  (before it even requests a ticket) — avoids two concurrent saves of the
+  same character potentially landing out of order.
+
+**Risk:** Core join/leave/voyage path, changed without the ability to
+compile it — see Verified/Not verified below. If there's a bug, the likely
+symptom is one of: a join that never completes (stuck on "Connecting…" —
+check for an exception path inside `HandleHelloAsync` that returns without
+enqueuing anything onto `pending`), a voyage that hangs after "Voyaging
+to…", or (lower probability, would show up as a compile error) a mistake in
+the new local functions since none of this was fed through `dotnet build`.
+
+**Revert:** `git revert <this-commit-sha>` — one self-contained commit
+touching exactly `Program.cs`, `Player.cs`, `GatewayClient.cs`; the pre-image
+is the fully-synchronous handshake and it worked, so a straight revert is
+safe if the new version misbehaves. No database migration involved.
+
+**Verified:** Read the full diff twice against the pre-image, confirming:
+the wire protocol is unchanged (checked `WorldConnection.cs` on the client —
+it has no synchronous-timing assumption anywhere, it already just waits for
+whatever arrives); every new failure path (gateway exception, bad ticket,
+character owned by another world, missing target world, peer disconnected
+mid-flight) either enqueues a denial/log or is a documented no-op, so
+nothing silently swallows a failure the old code used to report; every
+queued completion (`CompleteHello`, `CompleteRelease`, and the inline
+disconnect actions) is guarded by `StillConnected` so nothing sends to, or
+mutates state for, a peer that disconnected while its gateway call was in
+flight. Re-verified the synchronous duplicate-connection guard still runs
+before `player.CharacterId` is set and before any `await`, so two Hello
+messages arriving back-to-back on the single-threaded loop still resolve in
+order exactly as before. Traced the gateway's own `/characters/{id}/claim`,
+`/voyage`, and `/voyage/claim` endpoints (`apps/gateway/Program.cs`) to
+confirm they're already race-safe at the SQL level regardless of
+client-side timing — this fix doesn't depend on the gateway being any more
+careful than it already is, and nothing there needed to change.
+
+**Not verified — a human needs to check this on a real machine before
+trusting it:** **The code has not been compiled.** This sandbox has no .NET
+SDK and no network path to install one — confirmed by trying `dot.net`
+(the official install script), Microsoft's package feed, and Ubuntu's
+`security.ubuntu.com` `dotnet-sdk-*` packages; all three are blocked by the
+environment's egress allowlist. Before merging: `dotnet build
+apps/world-server` (and `apps/gateway`, unaffected but in the same solution
+shape), then `dotnet test tests/sim-core.tests` (untouched by this change,
+should be unaffected, but is the project's one real test gate). Then the
+actual scenario this fix targets: run the gateway + world-server, connect
+two clients, and confirm (a) both join and see each other, (b) a client
+that connects while the gateway is paused/unreachable eventually times out
+cleanly at ~8s instead of hanging forever and doesn't wedge the other
+client's movement, (c) a voyage between `continent-a` and `continent-b`
+still round-trips a character correctly, (d) blueprint building (commit/
+deposit/build/cancel) still works for a player who joined normally, since
+those message types are now gated behind the same `Ready` flag. None of
+this was possible to exercise here.
+
+**Rejected tonight:**
+- *Bound the blocking calls with just a timeout, leave them synchronous.*
+  Rejected because it only shrinks the blast radius (100s → 8s) without
+  removing it — every player would still freeze for up to 8 seconds on every
+  single join under normal gateway latency variance, still a perceptible
+  multiplayer-correctness bug, just a smaller one. The non-blocking version
+  costs the same 8s worst case but only to the one player who is joining or
+  leaving.
+- *Move the gateway HTTP calls onto a real message queue / actor mailbox per
+  player.* Rejected as over-engineering for a single-world-server process
+  with the tiny message volume here (joins and voyages are rare compared to
+  the 15Hz tick); the `ConcurrentQueue<Action>` drained once per tick gives
+  the same safety property (all shared state touched from one thread only)
+  with far less new machinery, and matches the fire-and-forget pattern
+  already established in this file.
+- Did not start on Phase 2 (new feature) at all — the decision rule says
+  skip it entirely when a fix-tonight finding exists, and completing this
+  backlogged one counted as exactly that.
+
+**Added to backlog:** No new findings — this session's audit reproduced the
+2026-07-24 list rather than surfacing anything new (the codebase moved a
+lot since, but in ways that don't change the earlier scoring: the god-script
+line counts, the missing gateway/world-server test coverage, and the
+migration-runner gap are all still accurate as described in `BACKLOG.md`).
+Marked the blocking-gateway-calls entry `[FIXED 2026-08-21]` there rather
+than deleting it, matching the convention the prior entry set.
+
+**Question for the human:** Two, neither blocking: (1) should nightly
+sessions running in this sandbox type start with a mandatory `git fetch
+origin main` + branch-from-tip step before Phase 1, given tonight's process
+gap? (2) as the 2026-07-24 entry also asked — should nightly sessions get a
+sandbox with the .NET SDK preinstalled? Two sessions in a row have now
+shipped C# changes they could not compile.
+
+---
+
 ## 2026-07-24 — AUDIT-ONLY (fix, not feature)
 
 **Chose:** Closed a character-duplication hole: the world-server's normal

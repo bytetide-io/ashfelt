@@ -42,6 +42,22 @@ public sealed class Player
     public Dictionary<ItemId, int> Inventory { get; } = new();
     public bool InventoryDirty { get; set; }
 
+    /// <summary>
+    /// True once the Hello handshake has finished claiming this player's
+    /// character from the gateway. The claim is off-thread (see Program.cs),
+    /// so there is a real window after connect where no action but another
+    /// Hello is valid — accepting one earlier would race the claim
+    /// overwriting it.
+    /// </summary>
+    public bool Ready { get; set; }
+
+    /// <summary>
+    /// True while a voyage release is being negotiated with the gateway.
+    /// Guards against a second RequestRelease firing a duplicate save while
+    /// the first is still in flight.
+    /// </summary>
+    public bool Leaving { get; set; }
+
     /// <summary>Authoritative survival meters. Spawns full; drains on the tick.</summary>
     public SurvivalRules.SurvivalState Survival { get; private set; } = SurvivalRules.SurvivalState.Full;
 

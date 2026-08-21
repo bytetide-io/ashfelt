@@ -42,10 +42,13 @@ tests/sim-core.tests  The only automated test project in the repo. Covers
 
 1. Client connects UDP to a world-server, sends `Hello` (protocol version,
    device UUID, optional voyage ticket).
-2. World-server, synchronously (blocking its one packet/tick thread — see
-   Known debt): claims the character from the gateway
-   (`POST /characters/{id}/claim`, atomic ownership + load), replies
-   `Welcome` with spawn position, then backfills existing structures.
+2. World-server claims the character from the gateway
+   (`POST /characters/{id}/claim`, atomic ownership + load) off-thread (see
+   `HandleHelloAsync` in `Program.cs`, landed 2026-08-21 — this used to
+   block the tick loop, see the July 24 Known-debt entry below, now struck
+   through), replies `Welcome` with spawn position, then backfills existing
+   diffs/structures/build sites once the claim lands. The player is gated
+   behind a `Ready` flag until then — no other message is accepted.
 3. Client requests chunks around itself; world-server regenerates each chunk
    from `(seed, coord)` via `sim-core.TerrainGenerator`, layers any stored
    diffs on top, and sends `ChunkData`.
@@ -106,15 +109,20 @@ never for a value that depends on enumeration order.
 
 ## Known debt (see `BACKLOG.md` for scored, actionable entries)
 
-- **World-server is single-threaded and blocks on gateway HTTP calls** inside
-  the packet-receive handler (`Hello`, `RequestRelease`) via
-  `.GetAwaiter().GetResult()`. A slow or unreachable gateway stalls
-  *every* connected player's movement/harvest/tick processing for the
-  duration of the call, on every join and every voyage. Scored in
-  `BACKLOG.md`; not fixed tonight because it needs a real architecture
-  change (a pending-join queue drained from the tick loop) — bigger blast
-  radius to get wrong for less certain gain than the ownership bug, which is
-  a five-minute-round-trip data bug that's already exploitable today.
+- ~~**World-server is single-threaded and blocks on gateway HTTP calls**~~ —
+  **fixed 2026-08-21** (see `LOG.md`). `Hello` and `RequestRelease` now run
+  their gateway calls (`HandleHelloAsync` / `HandleReleaseAsync` in
+  `Program.cs`) off-thread and land results through a
+  `ConcurrentQueue<Action>` (`pending`) drained once per tick — the tick
+  loop and the packet-receive handler still only ever touch shared state
+  (`writer`, `players`, `buildSites`, a `NetPeer`) from that one thread. A
+  new `Player.Ready` flag gates every message but `Hello` until the async
+  claim completes, and `Player.Leaving` prevents a second concurrent
+  release. Worth remembering for the *next* gateway-touching feature: any
+  new call out to the gateway from inside `NetworkReceiveEvent` must follow
+  this same shape (kick off an `async Task` local function, `await` there,
+  `pending.Enqueue` the result) — a straight `.GetAwaiter().GetResult()` in
+  an event handler is a regression of this fix, not a new pattern to copy.
 - **`World3D.cs` (735 lines) and `SurvivalHud.cs` (940 lines)** are god
   scripts mixing net dispatch, terrain streaming, foliage generation,
   touch-input, harvest targeting, and (for the HUD) a full tabbed
