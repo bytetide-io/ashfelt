@@ -14,21 +14,14 @@ suspect the codebase has moved since.
   deleted per the "never silently repeat/undo, and log what you found"
   discipline — this is the one thing tonight's session fixed.
 
-- **World-server blocks its single packet/tick thread on gateway HTTP calls**
-  (`apps/world-server/Program.cs:121,144,322-325` — `Hello` and
-  `RequestRelease` both call `.GetAwaiter().GetResult()` on an HTTP round
-  trip). Score: Severity 4 × Blast radius 5 = **20**. A slow or unreachable
-  gateway freezes movement/harvest/tick broadcasts for *every* connected
-  player, on every join and every voyage — this is not a rare edge case, it's
-  the common path. Not fixed tonight: the correct fix is a real architecture
-  change (kick off the HTTP call as a real `Task`, park the connecting peer
-  in a "pending" state that only skips gameplay messages, and drain
-  completions from a thread-safe queue on the next tick so `PollEvents()`
-  cadence for everyone else is never blocked). That's a bigger, riskier
-  change than "ship one thing and be done" allows for a single night, and it
-  deserves its own dedicated session with room to actually reason about the
-  pending-state lifecycle (what happens if the peer disconnects mid-claim,
-  etc.) rather than being squeezed in alongside another fix.
+- **[FIXED 2026-08-21]** ~~World-server blocks its single packet/tick thread
+  on gateway HTTP calls (`Hello` and `RequestRelease` both called
+  `.GetAwaiter().GetResult()` on an HTTP round trip). Score: Severity 4 ×
+  Blast radius 5 = 20.~~ — see `LOG.md`. `Hello` and `RequestRelease` now run
+  their gateway calls off-thread and land results through a
+  `ConcurrentQueue<Action>` drained once per tick, exactly the shape this
+  entry sketched. Left struck through rather than deleted, matching the
+  convention the 2026-07-24 entry above it set.
 
 ### Mobile performance
 
