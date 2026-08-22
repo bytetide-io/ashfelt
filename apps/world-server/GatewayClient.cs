@@ -25,13 +25,16 @@ public sealed class GatewayClient
     }
 
     /// <summary>
-    /// Fetches a character, or null when the gateway has none yet (a fresh
-    /// device UUID) — the caller then starts the player empty and full.
+    /// Atomically takes ownership of a character for <paramref name="worldId"/>
+    /// and returns its stored state (freshly defaulted if this UUID has never
+    /// saved before). Returns null when another world already owns the
+    /// character — the caller must reject the join rather than load a second,
+    /// independent copy of the same inventory (see gateway Program.cs).
     /// </summary>
-    public async Task<CharacterState?> GetCharacterAsync(Guid id)
+    public async Task<CharacterState?> ClaimCharacterAsync(Guid id, string worldId)
     {
-        var response = await _http.GetAsync($"/characters/{id}");
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        var response = await _http.PostAsJsonAsync($"/characters/{id}/claim", new { worldId });
+        if (response.StatusCode == HttpStatusCode.Conflict) return null;
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<CharacterState>();
     }

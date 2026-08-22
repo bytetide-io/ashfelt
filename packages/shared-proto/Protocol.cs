@@ -60,6 +60,44 @@ public enum MessageId : byte
     /// </summary>
     EatRequest = 8,
 
+    /// <summary>
+    /// Commit a designed blueprint into a build site the player then supplies.
+    /// Layout: ushort pieceCount, then each piece as byte kind
+    /// (<see cref="BuildPieceKind"/>), byte material (<see cref="BuildMaterial"/>),
+    /// int x, int y, int level, byte layer (<see cref="PieceLayer"/>). The server
+    /// canonicalises each slot, validates the whole plan against the shared
+    /// <c>BuildingRules</c> and the terrain, and on success creates a build site
+    /// owned by this character and replies with <see cref="BlueprintState"/>. An
+    /// illegal or empty plan is dropped.
+    /// </summary>
+    CommitBlueprint = 9,
+
+    /// <summary>
+    /// Deposit materials from inventory into a build site's on-site storage.
+    /// Layout: long siteId, byte item id, int amount. The server takes only what
+    /// the site's pending pieces still need and only what the player actually
+    /// holds; the reduced inventory and updated site come back as the usual
+    /// inventory and <see cref="BlueprintState"/> updates. Only the owner may
+    /// supply their own site.
+    /// </summary>
+    DepositRequest = 10,
+
+    /// <summary>
+    /// Advance construction at a build site by one strike on its next buildable
+    /// piece. Layout: long siteId. The server picks the lowest, most foundational
+    /// pending piece whose supports are built and whose materials are on site,
+    /// checks the player is within reach of it, and strikes it — broadcasting
+    /// <see cref="BuildProgress"/>. Only the owner may build their own site.
+    /// </summary>
+    BuildRequest = 11,
+
+    /// <summary>
+    /// Tear down a build site: refund its stockpiled materials to the owner and
+    /// remove every piece, built or pending. Layout: long siteId. The server
+    /// broadcasts <see cref="BuildSiteRemoved"/>. Only the owner may cancel.
+    /// </summary>
+    CancelBlueprint = 12,
+
     // server -> client
     Welcome = 100,
     ChunkData = 101,
@@ -114,12 +152,37 @@ public enum MessageId : byte
     /// connected to and owned by this world-server — nothing was released.
     /// </summary>
     ReleaseDenied = 110,
+
+    /// <summary>
+    /// The full state of one build site, sent only to its owner: the private
+    /// hologram plus construction and stockpile progress. Layout: long siteId,
+    /// ushort pieceCount, then each piece as byte kind, byte material, int x,
+    /// int y, int level, byte layer, byte built; then byte storageCount, then
+    /// each stored line as byte item id, int amount. Sent on commit, on deposit
+    /// and on a piece completing, and backfilled for the owner's sites on join.
+    /// </summary>
+    BlueprintState = 112,
+
+    /// <summary>
+    /// One construction strike landed on a piece. Layout: long siteId, byte kind,
+    /// byte material, int x, int y, int level, byte layer, byte strikesLeft, byte
+    /// strikesTotal, byte completed. A completed strike is broadcast to everyone so
+    /// the built piece appears in the shared world; a partial strike goes only to
+    /// the owner, since unbuilt pieces are the owner's private plan.
+    /// </summary>
+    BuildProgress = 113,
+
+    /// <summary>
+    /// A build site was torn down; clients drop all of its pieces. Layout: long
+    /// siteId. Broadcast, because others may have seen its built pieces.
+    /// </summary>
+    BuildSiteRemoved = 114,
 }
 
 public static class ProtocolVersion
 {
     /// <summary>Bumped whenever message layout changes. Mismatched peers are rejected.</summary>
-    public const int Current = 10;
+    public const int Current = 11;
 }
 
 /// <summary>Item kinds. Values are wire-stable — append only, never renumber.</summary>
@@ -137,6 +200,67 @@ public enum ItemId : byte
     Campfire = 9,
     /// <summary>Edible forage from a berry bush; restores hunger when eaten.</summary>
     Berry = 10,
+}
+
+/// <summary>
+/// A category of building piece in the modular blueprint system. Values are
+/// wire-stable — append only, never renumber — because a committed blueprint
+/// stores them and streams them to the client.
+/// </summary>
+public enum BuildPieceKind : byte
+{
+    None = 0,
+    /// <summary>Sits on the ground; everything else builds off it.</summary>
+    Foundation = 1,
+    /// <summary>A solid wall on a cell edge; blocks movement, encloses.</summary>
+    Wall = 2,
+    /// <summary>A wall with a passable gap; encloses without blocking.</summary>
+    Doorway = 3,
+    /// <summary>A wall with a glazed opening; blocks movement, encloses.</summary>
+    Window = 4,
+    /// <summary>A walkable surface at an upper level; the floor of a storey above.</summary>
+    Floor = 5,
+    /// <summary>A vertical post; carries a roof or upper floor without a full wall.</summary>
+    Pillar = 6,
+    /// <summary>A cover over a cell; the piece that makes a space count as sheltered.</summary>
+    Roof = 7,
+}
+
+/// <summary>
+/// The material a piece is built from — its tier and look. Wire-stable, append
+/// only. The concrete item cost of a (<see cref="BuildPieceKind"/>,
+/// <see cref="BuildMaterial"/>) pair lives in the sim-core structure catalog, so
+/// the wire only ever carries the pair, never the cost.
+/// </summary>
+public enum BuildMaterial : byte
+{
+    None = 0,
+    Wood = 1,
+    Stone = 2,
+    /// <summary>Woven reeds/fiber — a cheap early roof, raised before planks exist.</summary>
+    Thatch = 3,
+}
+
+/// <summary>
+/// Where in a cell a piece sits. A cell holds at most one piece per layer, which
+/// is what lets four walls, a floor, a roof and a post coexist on one tile
+/// without ambiguity. Wall layers name a cell *edge*; the edge shared by two
+/// cells is one physical wall, so slots are canonicalised (see the sim-core
+/// <c>PieceSlot</c>) to a single owner. Wire-stable, append only.
+/// </summary>
+public enum PieceLayer : byte
+{
+    None = 0,
+    /// <summary>Foundation or floor — the walkable base of the cell.</summary>
+    Ground = 1,
+    WallNorth = 2,
+    WallEast = 3,
+    WallSouth = 4,
+    WallWest = 5,
+    /// <summary>A roof covering the cell.</summary>
+    Cover = 6,
+    /// <summary>A pillar/post at the cell centre.</summary>
+    Post = 7,
 }
 
 public static class Tuning

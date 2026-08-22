@@ -75,22 +75,43 @@ app.MapGet("/worlds", () => Results.Ok(worlds.Values));
 // ticket self-heals — ownership returns to the world the character left.
 const int TicketTtlSeconds = 60;
 
-// Character load: returns the stored inventory + survival meters, or 404 when
-// the device UUID has never saved a character.
-app.MapGet("/characters/{id:guid}", async (Guid id, NpgsqlDataSource db) =>
+// Character claim: atomically takes ownership of a character for
+// requestingWorldId and returns its stored inventory + survival meters. A
+// character that has never been saved is created fresh (defaults) and claimed
+// in the same statement. Mirrors /voyage/claim's single-owner guarantee for
+// the far more common *non*-voyage join: without this, two connections
+// presenting the same character UUID (same world twice, or two worlds at
+// once) could both load and mutate independent in-memory copies of one
+// inventory — a duplication bug, not just a race.
+//
+// 409 means another world currently owns this character; the caller must
+// reject the join rather than load a copy anyway.
+app.MapPost("/characters/{id:guid}/claim", async (Guid id, ClaimRequest req, NpgsqlDataSource db) =>
 {
     // Self-heal a stranded voyage: if this character has a ticket that expired
-    // unclaimed, ownership returns to the world it left before we hand the state
-    // back. This is what makes a crash mid-transfer recover without an operator —
-    // the player simply reconnects and is loaded as if the voyage never began.
+    // unclaimed, ownership returns to the world it left before we try to claim
+    // it here. This is what makes a crash mid-transfer recover without an
+    // operator — the player simply reconnects and is loaded as if the voyage
+    // never began.
     await ReclaimExpiredTicketAsync(db, id);
 
-    await using var cmd = db.CreateCommand(
-        "SELECT inventory, hunger, stamina, health, warmth FROM character WHERE id = $1");
+    await using var cmd = db.CreateCommand("""
+        INSERT INTO character (id, owner_world_id, updated_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (id) DO UPDATE SET
+            owner_world_id = $2,
+            updated_at = now()
+        WHERE character.owner_world_id IS NULL OR character.owner_world_id = $2
+        RETURNING inventory, hunger, stamina, health, warmth
+        """);
     cmd.Parameters.AddWithValue(id);
+    cmd.Parameters.AddWithValue(req.WorldId);
 
     await using var reader = await cmd.ExecuteReaderAsync();
-    if (!await reader.ReadAsync()) return Results.NotFound();
+    // No row back means the ON CONFLICT ... WHERE guard failed: an existing
+    // row is owned by a different world. Not our character to load.
+    if (!await reader.ReadAsync())
+        return Results.Conflict(new { error = "character already owned by another world" });
 
     var character = new CharacterState
     {
@@ -242,3 +263,4 @@ static async Task ReclaimExpiredTicketAsync(NpgsqlDataSource db, Guid characterI
 record WorldEntry(string Id, string Host, int Port);
 record VoyageRequest(Guid CharacterId, string FromWorldId, string TargetWorldId);
 record VoyageClaim(Guid CharacterId, Guid Ticket, string WorldId);
+record ClaimRequest(string WorldId);
