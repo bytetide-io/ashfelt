@@ -10,8 +10,9 @@ string key = Environment.GetEnvironmentVariable("ASHFALL_CONNECT_KEY") ?? "ashfa
 string worldId = Environment.GetEnvironmentVariable("ASHFALL_WORLD_ID") ?? "continent-a";
 string? conn = Environment.GetEnvironmentVariable("ASHFALL_DB");
 string gatewayUrl = Environment.GetEnvironmentVariable("ASHFALL_GATEWAY") ?? "http://127.0.0.1:5041";
+string gatewayKey = Environment.GetEnvironmentVariable("ASHFALL_GATEWAY_KEY") ?? "ashfall";
 
-var gateway = new GatewayClient(gatewayUrl);
+var gateway = new GatewayClient(gatewayUrl, gatewayKey);
 var world = new World(seed);
 await using var store = await WorldStore.OpenAsync(conn, worldId, seed);
 int restored = await store.LoadDiffsAsync(world);
