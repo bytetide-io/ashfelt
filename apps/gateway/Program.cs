@@ -23,6 +23,40 @@ builder.Services.AddNpgsqlDataSource(conn, b => b.EnableDynamicJson());
 
 var app = builder.Build();
 
+// Every route below but /health and /worlds trusts its caller to be a
+// world-server, never a player's device: PUT /characters lets the caller set
+// inventory and survival meters directly, bypassing every harvest/craft/eat
+// check a world-server would normally run. Without this gate, a player who
+// simply reads their own device UUID (client-stored, by design) could call it
+// themselves and grant their character anything — a silent, total break of the
+// server-authoritative invariant. The key is shared out-of-band with each
+// world-server via ASHFALL_GATEWAY_KEY (see GatewayClient); it is never sent to
+// or known by the client.
+string gatewayKey = Environment.GetEnvironmentVariable("ASHFALL_GATEWAY_KEY") ?? "ashfall";
+if (gatewayKey == "ashfall")
+    Console.WriteLine("[gateway] WARNING: ASHFALL_GATEWAY_KEY not set — using the default " +
+                       "dev key. Set a real secret before this gateway is reachable from " +
+                       "anywhere but localhost.");
+
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path;
+    if (path.StartsWithSegments("/health") || path.StartsWithSegments("/worlds"))
+    {
+        await next();
+        return;
+    }
+
+    if (!context.Request.Headers.TryGetValue("X-Ashfall-Key", out var provided) ||
+        provided.Count != 1 || provided[0] != gatewayKey)
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        return;
+    }
+
+    await next();
+});
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok", proto = ProtocolVersion.Current }));
 
 // World registry. Static for now (Phase 3+ replaces this with live world-server

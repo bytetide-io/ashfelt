@@ -1,114 +1,162 @@
 # Nightly backlog
 
-Ranked ideas and findings not yet built/fixed, newest audit first. Score is
-Severity(1-5) × Blast radius(1-5) at the time it was logged — re-score if you
-suspect the codebase has moved since.
+Ranked ideas and findings not yet built/fixed. Score is
+`Severity(1-5) × Blast radius(1-5)` at the time it was logged — re-score if
+you suspect the codebase has moved since. Highest first. A night should
+generally pull from the top unless it has a good reason not to (record the
+reason in `LOG.md` if so).
 
-## From 2026-07-24 audit
+## Open
 
-### Multiplayer correctness
+### 1. World-server blocks its single packet/tick thread on gateway HTTP calls — score 20 (S4×B5)
+`apps/world-server/Program.cs` — the `Hello` and `RequestRelease` handlers
+both call `.GetAwaiter().GetResult()` on an HTTP round trip to the gateway
+(`ClaimCharacterAsync`, `ClaimVoyageAsync`, `SaveCharacterAsync`,
+`RequestVoyageAsync`). A slow or unreachable gateway freezes
+movement/harvest/tick broadcasts for *every* connected player, on every join
+and every voyage — not a rare edge case, the common path. Logged
+2026-07-24, not yet fixed: the correct fix is a real architecture change (a
+real background `Task` for the HTTP call, a "pending" peer state that skips
+gameplay messages, completions drained from a thread-safe queue on the next
+tick so `PollEvents()` cadence for everyone else is never blocked). Bigger
+and riskier than a single night allows; deserves its own session with room to
+reason about the pending-state lifecycle (mid-claim disconnects, etc.).
 
-- **[FIXED 2026-07-24]** ~~No ownership check on normal (non-voyage)
-  character load, letting the same character UUID be loaded concurrently by
-  two sessions~~ — see `LOG.md`. Leaving the entry struck through rather than
-  deleted per the "never silently repeat/undo, and log what you found"
-  discipline — this is the one thing tonight's session fixed.
+### 2. No per-action rate limit on Chop/Craft/Place requests — score 12 (S4×B3)
+`apps/world-server/Program.cs` handles `ChopRequest`, `CraftRequest`, and
+`PlaceRequest` with a reach/inventory check but no cooldown. A client that
+sends these messages faster than the intended interaction pace (a modified
+client, or a bare LiteNetLib client using the public default connect key) can
+fell nodes and gather resources far faster than the harvest-strike pacing
+implies, trivializing the core gather loop — directly undermines the
+project's #1 stated priority ("does this make surviving more interesting?").
+Needs a custom game client to exploit, not a stock client/curl, unlike #4
+below — lower urgency than that was. Fix shape: track `LastActionAt` per
+player per action kind (mirroring `Player.LastAcceptedAt` for movement) and
+reject requests inside some minimum interval, probably tied to
+`HarvestNodeDef`/animation timing once that exists client-side.
 
-- **World-server blocks its single packet/tick thread on gateway HTTP calls**
-  (`apps/world-server/Program.cs:121,144,322-325` — `Hello` and
-  `RequestRelease` both call `.GetAwaiter().GetResult()` on an HTTP round
-  trip). Score: Severity 4 × Blast radius 5 = **20**. A slow or unreachable
-  gateway freezes movement/harvest/tick broadcasts for *every* connected
-  player, on every join and every voyage — this is not a rare edge case, it's
-  the common path. Not fixed tonight: the correct fix is a real architecture
-  change (kick off the HTTP call as a real `Task`, park the connecting peer
-  in a "pending" state that only skips gameplay messages, and drain
-  completions from a thread-safe queue on the next tick so `PollEvents()`
-  cadence for everyone else is never blocked). That's a bigger, riskier
-  change than "ship one thing and be done" allows for a single night, and it
-  deserves its own dedicated session with room to actually reason about the
-  pending-state lifecycle (what happens if the peer disconnects mid-claim,
-  etc.) rather than being squeezed in alongside another fix.
+### 3. `World3D.UpdateGatherPrompt` runs an unconditional per-physics-tick scan — score 12 (S4×B3)
+`apps/client/scripts/world3d/World3D.cs:491-559` runs a 7×7-tile scan every
+physics tick (60/sec), each tile costing a multi-octave FBM height sample
+plus 1-3 `Noise.Hash` calls via `sim-core.TerrainGenerator`. Runs even while
+standing still and even while the action sheet hides the visual prompt. Fix:
+cache the player's current tile coordinate and early-return when it hasn't
+changed since the last physics frame; skip the scan entirely while the
+action sheet is open.
 
-### Mobile performance
+### 4. `SurvivalHud.cs` / `World3D.cs` / `WorldConnection.cs` — score 9 each (S3×B3)
+All three already flagged in `docs/gameplay-roadmap.md` §3.4 and have grown
+since it was written, not shrunk:
+- `SurvivalHud.cs` (940 lines, was 419) — one class builds every HUD panel
+  (4 survival meters, day/night chip, touch stick + jump button, hotbar,
+  gather prompt, a full tabbed action sheet with its own tab state machine
+  and business logic like calling `CraftingRules.CanCraft` directly). No
+  reusable meter/slot widget exists.
+- `World3D.cs` (735 lines, was 616) — net dispatch, day/night lighting,
+  procedural foliage generation, touch-input classification, harvest-target
+  scanning, and structure placement/mesh building in one script.
+- `WorldConnection.cs`'s `OnReceive` — a 12-case hand-decoded switch on
+  `MessageId` with wire order that must exactly match the server's writer
+  with no compile-time check; a reordering on either side is a silent wire
+  bug.
 
-- **`World3D.UpdateGatherPrompt` (`apps/client/scripts/world3d/World3D.cs:491-559`)**
-  runs an unconditional 7×7-tile scan every physics tick (60/sec), each tile
-  costing a multi-octave FBM height sample plus 1-3 `Noise.Hash` calls via
-  `sim-core.TerrainGenerator`. Runs even while standing still and even while
-  the action sheet hides the visual prompt. Score: Severity 4 × Blast radius
-  3 = **12**. Fix: cache the player's current tile coordinate and early-return
-  when it hasn't changed since the last physics frame; skip the scan entirely
-  while the action sheet is open.
+Fix shape for all three is already in roadmap §3.4/§3.2: split `World3D.cs`
+by responsibility with a `MessageId`-keyed dispatch table (mirrors §3.2's
+typed read/write helpers, which would also fix the `WorldConnection.cs`
+fragility above), build a reusable item-slot/meter widget kit for the HUD.
 
-### Architecture / maintainability
+### 5. No server-side interest management — score 9 (S3×B3), grows with player count
+`PlayerStates` (every tick) and `StatsUpdate` (heartbeat) broadcast to every
+connected player regardless of distance, in `apps/world-server/Program.cs`'s
+`Broadcast(...)` calls. `Tuning.InterestRadiusChunks` exists but nothing reads
+it for entity broadcast (chunks are already pull-based via `RequestChunk`, so
+terrain streaming is fine). This is invariant #6 on paper, not in code yet —
+tracked as planned work in `docs/gameplay-roadmap.md` §3.3 (build the
+entity/actor system with interest management, and make players the first
+entity kind through it). Low real impact while worlds hold a handful of
+players; will start costing real bandwidth and CPU once that changes.
 
-- **`SurvivalHud.cs` is 940 lines** (`apps/client/scripts/ui/SurvivalHud.cs`
-  per the client audit — grown from the 419 cited in
-  `docs/gameplay-roadmap.md` §3.4, not shrunk). One class builds 4 survival
-  meters, the day/night chip, touch stick + jump button, hotbar, gather
-  prompt, and a full tabbed action sheet (inventory/craft/build/travel) with
-  its own tab state machine and business logic (`RefreshActionAvailability`
-  calling `CraftingRules.CanCraft` directly). No reusable meter/slot widget
-  exists — `AddMeter`, `HotbarSlotFor`, `GridSlot`, `BuildCraftCard`,
-  `BuildPlaceCard` each hand-build near-identical layouts. Score: Severity 3
-  × Blast radius 3 = **9**. Fix: extract a `MeterRow` and one `ItemSlot`
-  widget reused by hotbar/inventory/craft/place; split the action sheet into
-  its own scene/controller (roadmap §3.4).
+### 6. `World3D.CollectTrees`/`CollectShrubs`/`CollectBerryBushes` triplicate the same pattern — score 6 (S3×B2)
+`apps/client/scripts/world3d/World3D.cs:325-436` — same loop/sample/jitter/
+place pattern three times, differing only in density constant and offset
+scale. Due per `CLAUDE.md`'s "third occurrence is a refactor," and Phase C
+will add more foliage types on this same pattern. Fix: one
+`CollectFoliage(TileType, perTile, saltBase, place)` helper.
 
-- **`World3D.cs` is 735 lines**, up from 616, mixing net dispatch, day/night
-  lighting, procedural foliage generation, touch-input classification,
-  harvest-target scanning, and structure placement/mesh building in one
-  script. Score: Severity 3 × Blast radius 3 = **9**. Fix: split per roadmap
-  §3.4 into separate nodes/systems World3D composes.
+### 7. `PUT /characters/{id}` doesn't check `owner_world_id` — score 8 (S4×B2)
+The claim endpoint (`POST /characters/{id}/claim`, fixed 2026-07-24) and the
+gateway auth gate (`X-Ashfall-Key`, fixed 2026-08-22) together close the two
+biggest holes here, but the plain save endpoint still lets *any*
+authenticated world-server overwrite *any* character regardless of who
+currently owns it. Today only trusted world-servers hold the key, and each
+only saves its own connected players, so this needs a second bug (a
+compromised or misbehaving world-server) to matter. Worth adding once there's
+more than one real deployment: reject (or at least warn-log) a `PUT` where
+the caller's `worldId` doesn't match the character's current
+`owner_world_id`.
 
-- **`WorldConnection.cs:299-420` `OnReceive`** is a 12-case hand-decoded
-  switch on `MessageId` with wire order that must exactly match the server's
-  writer with no compile-time check. Score: Severity 3 × Blast radius 3 = **9**.
-  Fix: per-message `Read`/`Write` static pairs in `shared-proto` (roadmap
-  §3.2), then a dispatch table here.
+### 8. Inconsistent node-path coupling in the client — score 4 (S2×B2)
+`apps/client/scripts/world3d/PlayerBody.cs:46` uses a raw
+`GetNode<Node3D>("../CameraRig")` relative path while `World3D.cs` uses
+exported `NodePath` fields for some lookups and hardcoded string
+`GetNode<T>(...)` for others in the same method. Fix: exported `NodePath`
+fields consistently.
 
-- **`World3D.CollectTrees`/`CollectShrubs`/`CollectBerryBushes`
-  (`apps/client/scripts/world3d/World3D.cs:325-436`)** triplicate the same
-  loop/sample/jitter/place pattern, differing only in density constant and
-  offset scale. Score: Severity 3 × Blast radius 2 = **6**. Fix: one
-  `CollectFoliage(TileType, perTile, saltBase, place)` helper — due per
-  CLAUDE.md's "third occurrence is a refactor," and Phase C will add more
-  foliage types on this same pattern.
+### 9. `CharacterState` has no version field — score 4 (S2×B2)
+Every change so far (adding `owner_world_id`, then `Warmth`) has been
+additive with a safe DB-column default, so nothing has broken yet. There's no
+guard against a genuinely breaking change (renaming/removing a field) landing
+without a migration path. Low urgency until a breaking change is actually
+needed — tracked here so whoever makes one thinks about it first.
 
-- **Inconsistent node-path coupling**: `PlayerBody.cs:46` uses a raw
-  `GetNode<Node3D>("../CameraRig")` relative path while `World3D.cs` uses
-  exported `NodePath` fields for some lookups and hardcoded string
-  `GetNode<T>(...)` for others in the same method. Score: Severity 2 ×
-  Blast radius 2 = **4**. Fix: exported `NodePath` fields consistently.
+### 10. Migrations only auto-apply to a fresh Postgres volume — unscored, operational
+`infra/migrations/*.sql` run via `docker-entrypoint-initdb.d`, which Postgres
+only executes once against an empty data directory. An already-running
+deployment needs someone to hand-apply new migration files. The files
+themselves are safely idempotent (`IF NOT EXISTS`, `ADD COLUMN ... DEFAULT`),
+so this is an operational trap, not a data-loss risk. Fix shape: a tiny
+migration runner (even just "apply any `.sql` in order, tracked in a
+`schema_migrations` table") the world-server or a startup script runs before
+serving.
 
-### Persistence
+### 11. No automated test coverage for `apps/gateway` or `apps/world-server` — unscored, process gap
+Only `sim-core` has a test project. Two nights running now (2026-07-24,
+2026-08-22) have shipped gateway auth/ownership changes verified by manual
+code review only, because neither session had a working `dotnet` in its
+sandbox (see #12). A future night should add an integration test project
+that spins up the gateway against a real (or testcontainers) Postgres and
+exercises the claim/save/voyage/auth endpoints directly, including the
+concurrent-claim race and the unauthenticated-request-gets-401 case.
 
-- **No formal migration runner/version field** — `infra/migrations/*.sql`
-  are numbered files applied once via Postgres `initdb.d`, not replayed
-  against a live DB. The additive `ALTER TABLE ... ADD COLUMN IF NOT EXISTS
-  ... DEFAULT` convention has held so far (used for `owner_world_id` and
-  `warmth`) but there's no tooling enforcing it and no way to apply a new
-  migration to an already-running Postgres without a manual `psql` step. Not
-  scored (no severity yet — no incident), but worth a real migration tool
-  (DbUp, Flyway, or even a tiny hand-rolled `schema_version` table + runner)
-  before this ships with real player data.
+### 12. This sandbox has no .NET SDK — blocks verification, not scored
+Both nightly sessions to date (2026-07-24, 2026-08-22) ran in a sandbox with
+no `dotnet` on `PATH` and could not build, test, or run anything in this
+repo. `dotnet test tests/sim-core.tests` (required before any commit per
+`CLAUDE.md`) could not be run either time. This is now a pattern: whoever
+reviews a nightly diff should treat it as **unverified by construction**, and
+whoever provisions the sandbox should get the .NET 10 SDK (and ideally a
+reachable Postgres) preinstalled so future sessions aren't flying blind.
 
-### Testing
+## Fixed
 
-- **No test coverage at all for `apps/gateway` or `apps/world-server`** — only
-  `sim-core` has a test project. The ownership-claim fix landed tonight
-  (`POST /characters/{id}/claim`) has no automated regression test; it was
-  verified by manual code review only (see `LOG.md` — no dotnet SDK available
-  this session). A future night should add an integration test project that
-  spins up the gateway against a real (or testcontainers) Postgres and
-  exercises the claim/voyage/save endpoints directly, including the
-  concurrent-claim race this fix targets.
+- **~~No ownership check on normal (non-voyage) character load, letting the
+  same character UUID be loaded concurrently by two sessions~~** — fixed
+  2026-07-24: `GET /characters/{id}` replaced with atomic
+  `POST /characters/{id}/claim`. See `LOG.md`.
+- **~~No authentication at all on any gateway route~~** — fixed 2026-08-22:
+  every route but `/health`/`/worlds` now requires the `X-Ashfall-Key` shared
+  secret. Before this, any HTTP caller who knew a character's device UUID
+  (every player knows their own) could set that character's inventory and
+  survival meters directly, bypassing the ownership-claim fix above entirely
+  — claiming ownership doesn't help if the save endpoint next to it has no
+  authentication either. See `LOG.md`.
 
-## Rejected feature ideas (logged per Phase-2 discipline, not built — audit
-found a fix-tonight-caliber bug first, so Phase 2 wasn't reached)
+## Rejected / deferred by design (not backlog — for context)
 
-None yet — Phase 2 (new feature) was skipped tonight because the audit
-surfaced a multiplayer-correctness finding scoring 20 (over the 15 threshold,
-and over the 9 threshold on the multiplayer-correctness track), which the
-routine's decision rule requires fixing instead of building new content.
+- **PvP.** `docs/voyage-transfer.md` explicitly defers PvP during voyage "not
+  until instant transfer is solid and shipped," and `CLAUDE.md` states the
+  game is "not a shooter." The scheduled nightly-routine prompt template
+  assumes PvP/PvE is a genre pillar; the project's own docs say otherwise.
+  Noted here so a future night doesn't propose combat-first features against
+  the grain of the actual design.

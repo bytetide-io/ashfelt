@@ -122,7 +122,12 @@ bounds before sending, and a legitimate player is never corrected.
    world-server stores its procgen seed and only player-caused modifications,
    keyed by chunk coordinate (`tile_diff`, `structure`).
 3. **Character is global, map is not.** Inventory, stats and skills live in the
-   gateway database. World-servers hold world state only.
+   gateway database. World-servers hold world state only. The gateway's
+   character/voyage routes trust their caller to be a world-server that has
+   already validated everything it writes — invariant #1 depends on that trust
+   holding, so those routes require the `X-Ashfall-Key` shared secret
+   (`ASHFALL_GATEWAY_KEY`) and the client is never given it. See
+   `apps/gateway/API.md`.
 4. **One shared simulation library.** `packages/sim-core` defines terrain
    generation, tile rules and (later) crafting. Client and world-server both
    reference it. Logic is never duplicated across the boundary — if the client

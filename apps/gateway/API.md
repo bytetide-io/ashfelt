@@ -3,6 +3,20 @@
 Base URL in dev: `http://localhost:5041` (see `Properties/launchSettings.json`).
 Requires `ASHFALL_DB` (Postgres connection string) for character storage.
 
+## Authentication
+
+Every route except `/health` and `/worlds` requires an `X-Ashfall-Key` header
+matching the gateway's `ASHFALL_GATEWAY_KEY` (default `ashfall`, for local dev
+only). These routes let the caller set a character's inventory and survival
+meters directly — that's fine for a world-server, which only ever writes what
+it already validated, but not for anyone else. A request missing or mismatching
+the key gets `401 Unauthorized`. **Never** give this key to the client; it is
+shared only between the gateway and each world-server (`GatewayClient`).
+
+```
+401 Unauthorized   — missing or wrong X-Ashfall-Key
+```
+
 ## GET /health
 
 Liveness plus the protocol version the gateway was built against.

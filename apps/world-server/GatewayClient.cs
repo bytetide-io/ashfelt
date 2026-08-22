@@ -13,9 +13,15 @@ public sealed class GatewayClient
 {
     private readonly HttpClient _http;
 
-    public GatewayClient(string baseUrl)
+    /// <summary>
+    /// <paramref name="gatewayKey"/> proves this caller is a trusted world-server,
+    /// not a player's device — the gateway rejects every character/voyage request
+    /// without it. Must match <c>ASHFALL_GATEWAY_KEY</c> on the gateway.
+    /// </summary>
+    public GatewayClient(string baseUrl, string gatewayKey)
     {
         _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        _http.DefaultRequestHeaders.Add("X-Ashfall-Key", gatewayKey);
     }
 
     /// <summary>
