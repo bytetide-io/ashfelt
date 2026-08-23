@@ -3,8 +3,16 @@ using Ashfall.Proto;
 
 namespace Ashfall.SimCore;
 
-/// <summary>A structure a player placed on the world, at a tile coordinate.</summary>
-public readonly record struct Structure(long Id, int TileX, int TileY, ItemId Kind);
+/// <summary>A structure a player placed on the world, at a tile coordinate.
+/// <c>FuelTicks</c> is only meaningful for a structure <see cref="FireRules.Burns"/>
+/// accepts — zero for one that doesn't, and for one that does once its fuel runs
+/// out.</summary>
+public readonly record struct Structure(long Id, int TileX, int TileY, ItemId Kind, int FuelTicks = 0)
+{
+    /// <summary>True when this structure currently provides its warmth — a
+    /// non-burning structure is never lit; a burning one is lit while fuelled.</summary>
+    public bool Lit => FireRules.Burns(Kind) && FuelTicks > 0;
+}
 
 /// <summary>
 /// Generated terrain plus the player-caused diffs layered on top. Diffs and
@@ -106,7 +114,8 @@ public sealed class World
         if (!TerrainGenerator.IsWalkable(TileAt(tileX, tileY))) return default;
         if (_structures.ContainsKey((tileX, tileY))) return default;
 
-        var structure = new Structure(_nextStructureId++, tileX, tileY, kind);
+        int fuel = FireRules.Burns(kind) ? FireRules.InitialFuelTicks : 0;
+        var structure = new Structure(_nextStructureId++, tileX, tileY, kind, fuel);
         _structures[(tileX, tileY)] = structure;
         return new Placement(true, structure);
     }
@@ -122,10 +131,61 @@ public sealed class World
     public bool RemoveStructure(int tileX, int tileY) => _structures.TryRemove((tileX, tileY), out _);
 
     /// <summary>
+    /// The outcome of feeding a structure one log. <c>Structure</c> is only
+    /// meaningful when <c>Allowed</c> is true; <c>Reignited</c> is true when the
+    /// fire was cold before this log (fuel was at zero) so the caller knows to
+    /// tell watchers it is lit again.
+    /// </summary>
+    public readonly record struct FeedResult(bool Allowed, Structure Structure, bool Reignited);
+
+    /// <summary>
+    /// Feeds one log's worth of fuel to the burning structure at a tile, if any.
+    /// Refuses when nothing is there, the structure does not burn, or it is
+    /// already fuelled to <see cref="FireRules.MaxFuelTicks"/> — the caller should
+    /// not spend the player's wood on a fire that cannot take more.
+    /// </summary>
+    public FeedResult TryFeed(int tileX, int tileY)
+    {
+        if (!_structures.TryGetValue((tileX, tileY), out var structure)) return default;
+        if (!FireRules.Burns(structure.Kind)) return default;
+        if (structure.FuelTicks >= FireRules.MaxFuelTicks) return default;
+
+        bool reignited = structure.FuelTicks <= 0;
+        var fed = structure with
+        {
+            FuelTicks = Math.Min(FireRules.MaxFuelTicks, structure.FuelTicks + FireRules.FuelTicksPerLog),
+        };
+        _structures[(tileX, tileY)] = fed;
+        return new FeedResult(true, fed, reignited);
+    }
+
+    /// <summary>
+    /// Drains every burning structure's fuel by <paramref name="ticks"/>. Returns
+    /// the structures that went cold this call (fuel reached zero), so the caller
+    /// can tell watchers their fire went out — a structure that was already cold,
+    /// or never burns, is never included.
+    /// </summary>
+    public IReadOnlyList<Structure> AdvanceFires(int ticks)
+    {
+        List<Structure>? extinguished = null;
+        foreach (var (tile, structure) in _structures)
+        {
+            if (!FireRules.Burns(structure.Kind) || structure.FuelTicks <= 0) continue;
+
+            int remaining = Math.Max(0, structure.FuelTicks - ticks);
+            var updated = structure with { FuelTicks = remaining };
+            _structures[tile] = updated;
+            if (remaining == 0) (extinguished ??= new List<Structure>()).Add(updated);
+        }
+        return (IReadOnlyList<Structure>?)extinguished ?? Array.Empty<Structure>();
+    }
+
+    /// <summary>
     /// True when <paramref name="position"/> lies within the warmth radius of any
-    /// heat-providing structure (a lit campfire). Horizontal distance only, so a
-    /// ledge above the fire still counts — mirrors how harvest reach is measured.
-    /// This is what lets a player survive the night by sheltering near a fire.
+    /// lit heat-providing structure (a burning campfire). Horizontal distance
+    /// only, so a ledge above the fire still counts — mirrors how harvest reach
+    /// is measured. This is what lets a player survive the night by sheltering
+    /// near a tended fire, and what makes an untended one stop counting.
     /// </summary>
     public bool HasWarmthNear(Vec3 position)
     {
@@ -133,6 +193,7 @@ public sealed class World
         foreach (var structure in _structures.Values)
         {
             if (!ItemCatalog.TryGet(structure.Kind, out var def) || def.WarmthRadiusMetres <= 0) continue;
+            if (FireRules.Burns(structure.Kind) && !structure.Lit) continue;
 
             var centre = new Vec3((structure.TileX + 0.5) * metres, position.Y, (structure.TileY + 0.5) * metres);
             if (position.HorizontalDistanceTo(centre) <= def.WarmthRadiusMetres) return true;

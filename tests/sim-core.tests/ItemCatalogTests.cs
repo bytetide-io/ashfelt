@@ -102,7 +102,9 @@ public class ItemCatalogTests
         Assert.False(ItemCatalog.ProvidesWarmth(ItemId.Wall));
 
         var world = new World(1337u);
-        world.LoadStructure(new Structure(1, TileX: 10, TileY: 10, ItemId.Campfire));
+        // A campfire only provides warmth while fuelled (FireRules) — this test is
+        // about the warmth radius, not fuel, so load it lit.
+        world.LoadStructure(new Structure(1, TileX: 10, TileY: 10, ItemId.Campfire, FireRules.InitialFuelTicks));
 
         double metres = TerrainGenerator.TileMetres;
         double radius = ItemCatalog.Of(ItemId.Campfire).WarmthRadiusMetres;

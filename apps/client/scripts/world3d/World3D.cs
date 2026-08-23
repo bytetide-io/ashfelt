@@ -54,6 +54,11 @@ public partial class World3D : Node3D
     private readonly Dictionary<long, Node3D> _structures = new();
     private Node3D _structureRoot = null!;
 
+    /// <summary>Every campfire's tile and lit state, keyed by server id — the
+    /// bookkeeping the tap-to-feed reticle searches to find an unlit fire in
+    /// reach, and that a fuel-changed broadcast updates.</summary>
+    private readonly Dictionary<long, (int TileX, int TileY, bool Lit)> _campfires = new();
+
     private WorldConnection _connection = null!;
     private PlayerBody _player = null!;
     private Label _status = null!;
@@ -102,8 +107,10 @@ public partial class World3D : Node3D
         _connection.PlayerLeft += id => CallDeferred(nameof(OnPlayerLeft), id);
         _connection.StatsUpdated += (_, _, _, _, timeOfDay) =>
             CallDeferred(nameof(SyncClock), timeOfDay);
-        _connection.StructurePlaced += (id, kind, tx, ty) =>
-            CallDeferred(nameof(OnStructurePlaced), id, (int)kind, tx, ty);
+        _connection.StructurePlaced += (id, kind, tx, ty, lit) =>
+            CallDeferred(nameof(OnStructurePlaced), id, (int)kind, tx, ty, lit);
+        _connection.StructureFuelChanged += (id, lit) =>
+            CallDeferred(nameof(OnStructureFuelChanged), id, lit);
         _connection.TileChanged += (tx, ty, tile) =>
             CallDeferred(nameof(OnTileChanged), tx, ty, (int)tile);
         _connection.HarvestProgress += (tx, ty, left, total) =>
@@ -159,6 +166,7 @@ public partial class World3D : Node3D
         _foliageByTile.Clear();
         _tileDiffs.Clear();
         _structures.Clear();
+        _campfires.Clear();
         _remotes.Clear();
     }
 
@@ -455,6 +463,10 @@ public partial class World3D : Node3D
     /// landed on, so hitting a tree never demands pixel-accurate aim.</summary>
     private (int X, int Y)? _gatherTarget;
 
+    /// <summary>The nearest unlit campfire in reach, when no harvestable node is
+    /// closer. A tap feeds it a held Wood log instead of gathering.</summary>
+    private (int X, int Y)? _feedTarget;
+
     /// <summary>
     /// Classifies a touch (or editor mouse click) as a tap. A tap gathers the
     /// currently reticled node; the resolution happens in <see cref="_PhysicsProcess"/>.
@@ -495,9 +507,11 @@ public partial class World3D : Node3D
         if (!_harvestQueued) return;
         _harvestQueued = false;
 
-        // Input is a request, never a state change: the tile does not change here.
-        // The server's TileChanged / HarvestProgress is what wears down the node.
+        // Input is a request, never a state change: nothing here mutates the
+        // world or the fire — the server's TileChanged / HarvestProgress /
+        // StructureFuelChanged broadcasts are what actually apply the result.
         if (_gatherTarget is { } target) _connection.SendChop(target.X, target.Y);
+        else if (_feedTarget is { } fire) _connection.SendFeedFire(fire.X, fire.Y);
     }
 
     /// <summary>
@@ -508,9 +522,9 @@ public partial class World3D : Node3D
     /// </summary>
     private void UpdateGatherPrompt()
     {
-        if (!_built) { _gatherTarget = null; _hud.HideGatherPrompt(); return; }
+        if (!_built) { ClearInteractionPrompt(); return; }
         var camera = GetViewport().GetCamera3D();
-        if (camera is null) { _gatherTarget = null; _hud.HideGatherPrompt(); return; }
+        if (camera is null) { ClearInteractionPrompt(); return; }
 
         float metres = (float)TerrainGenerator.TileMetres;
         float range = (float)Proto.Tuning.ChopRangeMetres;
@@ -539,13 +553,67 @@ public partial class World3D : Node3D
             found = true;
         }
 
-        if (!found) { _gatherTarget = null; _hud.HideGatherPrompt(); return; }
+        if (found)
+        {
+            _feedTarget = null;
+            _gatherTarget = (bestX, bestY);
+            var tile = EffectiveTile(bestX, bestY);
+            ShowPromptOver(camera, bestX, bestY, HarvestRules.Evaluate(tile).Item, "TAP TO GATHER");
+            return;
+        }
 
-        _gatherTarget = (bestX, bestY);
+        // Nothing to gather closer than an unlit campfire: offer to feed it
+        // instead, using the same tap and the same reticle.
+        if (FindNearestUnlitCampfire(player, range) is { } fire)
+        {
+            _gatherTarget = null;
+            _feedTarget = fire;
+            ShowPromptOver(camera, fire.X, fire.Y, ItemId.Wood, "TAP TO STOKE");
+            return;
+        }
 
-        float worldX = (float)((bestX + 0.5) * metres);
-        float worldZ = (float)((bestY + 0.5) * metres);
-        float worldY = (float)_terrain.HeightAt(bestX + 0.5, bestY + 0.5);
+        ClearInteractionPrompt();
+    }
+
+    private void ClearInteractionPrompt()
+    {
+        _gatherTarget = null;
+        _feedTarget = null;
+        _hud.HideGatherPrompt();
+    }
+
+    /// <summary>The nearest campfire within <paramref name="range"/> metres of
+    /// <paramref name="player"/> that has gone cold, if any — few enough campfires
+    /// ever exist near one player that a linear scan is cheaper than a spatial
+    /// index.</summary>
+    private (int X, int Y)? FindNearestUnlitCampfire(Vector3 player, float range)
+    {
+        float metres = (float)TerrainGenerator.TileMetres;
+        float bestSq = range * range;
+        (int X, int Y)? best = null;
+        foreach (var (tileX, tileY, lit) in _campfires.Values)
+        {
+            if (lit) continue;
+
+            float centreX = (float)((tileX + 0.5) * metres);
+            float centreZ = (float)((tileY + 0.5) * metres);
+            float distSq = (player.X - centreX) * (player.X - centreX)
+                         + (player.Z - centreZ) * (player.Z - centreZ);
+            if (distSq >= bestSq) continue;
+            bestSq = distSq;
+            best = (tileX, tileY);
+        }
+        return best;
+    }
+
+    /// <summary>Floats the HUD reticle over a world tile, in the HUD's own
+    /// full-resolution space.</summary>
+    private void ShowPromptOver(Camera3D camera, int tileX, int tileY, ItemId icon, string label)
+    {
+        float metres = (float)TerrainGenerator.TileMetres;
+        float worldX = (float)((tileX + 0.5) * metres);
+        float worldZ = (float)((tileY + 0.5) * metres);
+        float worldY = (float)_terrain.HeightAt(tileX + 0.5, tileY + 0.5);
         Vector2 viewportPoint = camera.UnprojectPosition(new Vector3(worldX, worldY, worldZ));
 
         // The world renders in a half-resolution SubViewport; scale its point up
@@ -554,8 +622,7 @@ public partial class World3D : Node3D
         Vector2 hudSize = _hud.Size;
         Vector2 scale = subSize == Vector2.Zero ? Vector2.One : hudSize / subSize;
 
-        var tile = EffectiveTile(bestX, bestY);
-        _hud.ShowGatherPrompt(viewportPoint * scale, HarvestRules.Evaluate(tile).Item);
+        _hud.ShowGatherPrompt(viewportPoint * scale, icon, label);
     }
 
     /// <summary>
@@ -626,12 +693,16 @@ public partial class World3D : Node3D
     private static readonly Color WallColour = new("8a8f99");
     private static readonly Color CampfireColour = new("d0743a");
 
+    /// <summary>Emission multiplier for a lit campfire's flame — matches the value
+    /// it was built with, so <see cref="SetCampfireLit"/> can restore it exactly.</summary>
+    private const float CampfireLitEmission = 2.0f;
+
     /// <summary>
     /// Renders one placed structure at the centre of its tile, sitting on the
     /// ground. Idempotent by server id so the join backfill and a live broadcast
     /// of the same structure collapse to a single mesh.
     /// </summary>
-    private void OnStructurePlaced(long id, int kind, int tileX, int tileY)
+    private void OnStructurePlaced(long id, int kind, int tileX, int tileY, bool lit)
     {
         if (!_built || _structures.ContainsKey(id)) return;
 
@@ -640,10 +711,38 @@ public partial class World3D : Node3D
         float z = (float)((tileY + 0.5) * metres);
         float y = (float)_terrain.HeightAt(tileX + 0.5, tileY + 0.5);
 
-        var node = BuildStructure((ItemId)kind);
+        var itemKind = (ItemId)kind;
+        var node = BuildStructure(itemKind);
         node.Position = new Vector3(x, y, z);
         _structureRoot.AddChild(node);
         _structures[id] = node;
+
+        if (itemKind == ItemId.Campfire)
+        {
+            _campfires[id] = (tileX, tileY, lit);
+            SetCampfireLit(node, lit);
+        }
+    }
+
+    /// <summary>
+    /// A campfire crossed the lit/unlit threshold — either it just ran out of
+    /// fuel, or a feed just reignited it. Updates the bookkeeping the feed
+    /// reticle reads and the fire's visuals.
+    /// </summary>
+    private void OnStructureFuelChanged(long id, bool lit)
+    {
+        if (!_campfires.TryGetValue(id, out var campfire)) return;
+        _campfires[id] = (campfire.TileX, campfire.TileY, lit);
+        if (_structures.TryGetValue(id, out var node)) SetCampfireLit(node, lit);
+    }
+
+    /// <summary>Toggles a campfire's flame and light for its current lit state —
+    /// a cold fire shows as a dark, unlit hearth rather than vanishing.</summary>
+    private static void SetCampfireLit(Node3D root, bool lit)
+    {
+        if (root.GetNodeOrNull<OmniLight3D>("Light") is { } light) light.Visible = lit;
+        if (root.GetNodeOrNull<MeshInstance3D>("Flame")?.MaterialOverride is StandardMaterial3D flame)
+            flame.EmissionEnergyMultiplier = lit ? CampfireLitEmission : 0f;
     }
 
     /// <summary>A box for a Wall, a small lit shape for a Campfire.</summary>
@@ -665,6 +764,7 @@ public partial class World3D : Node3D
         var root = new Node3D();
         root.AddChild(new MeshInstance3D
         {
+            Name = "Flame",
             Mesh = new CylinderMesh { TopRadius = 0.5f, BottomRadius = 0.6f, Height = 0.5f, RadialSegments = 8 },
             Position = Vector3.Up * 0.25f,
             MaterialOverride = new StandardMaterial3D
@@ -672,7 +772,7 @@ public partial class World3D : Node3D
                 AlbedoColor = CampfireColour,
                 EmissionEnabled = true,
                 Emission = new Color("ff7a1a"),
-                EmissionEnergyMultiplier = 2.0f,
+                EmissionEnergyMultiplier = CampfireLitEmission,
                 Roughness = 1.0f,
                 SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
                 TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest,
@@ -680,6 +780,7 @@ public partial class World3D : Node3D
         });
         root.AddChild(new OmniLight3D
         {
+            Name = "Light",
             Position = Vector3.Up * 0.8f,
             LightColor = new Color("ff9a3c"),
             LightEnergy = 2.2f,

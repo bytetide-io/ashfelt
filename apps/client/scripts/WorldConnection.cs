@@ -38,8 +38,12 @@ public partial class WorldConnection : Node
     public event Action<int, int, int, int>? HarvestProgress;
     public event Action<IReadOnlyDictionary<ItemId, int>>? InventoryUpdated;
 
-    /// <summary>(structure id, kind, tileX, tileY) — a structure to render.</summary>
-    public event Action<long, ItemId, int, int>? StructurePlaced;
+    /// <summary>(structure id, kind, tileX, tileY, lit) — a structure to render.</summary>
+    public event Action<long, ItemId, int, int, bool>? StructurePlaced;
+
+    /// <summary>(structure id, lit) — a burning structure crossed the lit/unlit
+    /// threshold; sent only on that transition, never per tick.</summary>
+    public event Action<long, bool>? StructureFuelChanged;
 
     /// <summary>(hunger, stamina, health, warmth) in display points, plus time-of-day in [0,1).</summary>
     public event Action<int, int, int, int, float>? StatsUpdated;
@@ -177,6 +181,19 @@ public partial class WorldConnection : Node
         _writer.Reset();
         _writer.Put((byte)MessageId.EatRequest);
         _writer.Put((byte)food);
+        _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
+    }
+
+    /// <summary>Ask to feed one held Wood log to the burning structure at a tile.
+    /// The server authorises it; refused silently, like a chop, when out of
+    /// reach, nothing burnable is there, or the player holds no wood.</summary>
+    public void SendFeedFire(int tileX, int tileY)
+    {
+        if (!IsLinked) return;
+        _writer.Reset();
+        _writer.Put((byte)MessageId.FeedFireRequest);
+        _writer.Put(tileX);
+        _writer.Put(tileY);
         _peer!.Send(_writer, DeliveryMethod.ReliableOrdered);
     }
 
@@ -387,7 +404,16 @@ public partial class WorldConnection : Node
                 long structureId = reader.GetLong();
                 var kind = (ItemId)reader.GetByte();
                 int tx = reader.GetInt(), ty = reader.GetInt();
-                StructurePlaced?.Invoke(structureId, kind, tx, ty);
+                bool lit = reader.GetBool();
+                StructurePlaced?.Invoke(structureId, kind, tx, ty, lit);
+                break;
+            }
+
+            case MessageId.StructureFuelChanged:
+            {
+                long structureId = reader.GetLong();
+                bool lit = reader.GetBool();
+                StructureFuelChanged?.Invoke(structureId, lit);
                 break;
             }
 

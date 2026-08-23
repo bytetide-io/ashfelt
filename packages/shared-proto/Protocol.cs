@@ -60,6 +60,15 @@ public enum MessageId : byte
     /// </summary>
     EatRequest = 8,
 
+    /// <summary>
+    /// Ask to feed one held <see cref="ItemId.Wood"/> log to the burning
+    /// structure at a world tile. Layout: int tileX, int tileY. The server
+    /// authorises it against <c>FireRules</c> and the player's inventory — refused
+    /// silently, like a chop or place, when out of reach, nothing burnable is
+    /// there, the player holds no wood, or the fire is already fuelled to its cap.
+    /// </summary>
+    FeedFireRequest = 9,
+
     // server -> client
     Welcome = 100,
     ChunkData = 101,
@@ -94,7 +103,9 @@ public enum MessageId : byte
     /// <summary>
     /// A structure exists in the world; the client renders it. Sent both as the
     /// per-structure backfill when a player joins and as a live broadcast when
-    /// one is placed. Layout: long id, byte kind, int tileX, int tileY.
+    /// one is placed. Layout: long id, byte kind, int tileX, int tileY, bool lit
+    /// (whether it is currently burning — meaningless for a structure that never
+    /// burns, but always present so the layout is fixed).
     /// </summary>
     StructurePlaced = 108,
 
@@ -114,12 +125,20 @@ public enum MessageId : byte
     /// connected to and owned by this world-server — nothing was released.
     /// </summary>
     ReleaseDenied = 110,
+
+    /// <summary>
+    /// A burning structure crossed the lit/unlit threshold — went cold, or was
+    /// just reignited by a feed. Layout: long id, bool lit. Sent only on that
+    /// transition, never per tick, so a fire slowly draining down costs no
+    /// bandwidth until the moment it actually changes state.
+    /// </summary>
+    StructureFuelChanged = 112,
 }
 
 public static class ProtocolVersion
 {
     /// <summary>Bumped whenever message layout changes. Mismatched peers are rejected.</summary>
-    public const int Current = 10;
+    public const int Current = 11;
 }
 
 /// <summary>Item kinds. Values are wire-stable — append only, never renumber.</summary>

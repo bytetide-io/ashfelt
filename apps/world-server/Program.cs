@@ -297,6 +297,36 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             break;
         }
 
+        case MessageId.FeedFireRequest:
+        {
+            int tx = reader.GetInt(), ty = reader.GetInt();
+            if (!player.IsWithinReach(tx, ty))
+            {
+                Console.WriteLine($"[world] player {player.Id} feed out of range at ({tx},{ty})");
+                break;
+            }
+            if (!player.Has(ItemId.Wood)) break;
+
+            var feed = world.TryFeed(tx, ty);
+            if (!feed.Allowed) break;
+
+            player.ConsumeOne(ItemId.Wood);
+            _ = store.SaveStructureFuelAsync(feed.Structure.Id, feed.Structure.FuelTicks);
+
+            // Only a reignition is worth telling watchers about: the fire was
+            // already lit and merely topped up otherwise, which changes nothing
+            // they can see.
+            if (feed.Reignited)
+            {
+                writer.Reset();
+                WriteStructureFuelChanged(writer, feed.Structure.Id, lit: true);
+                Broadcast(writer);
+            }
+
+            Console.WriteLine($"[world] player {player.Id} fed the fire at ({tx},{ty})");
+            break;
+        }
+
         case MessageId.RequestRelease:
         {
             string targetWorldId = reader.GetString();
@@ -389,6 +419,17 @@ while (!shutdown.IsSet)
         player.AdvanceSurvival(1, warm);
     }
 
+    // Untended fires go cold: drain one tick of fuel from every burning
+    // structure and tell watchers about any that just ran out. Persisted
+    // fire-and-forget, same as every other world write on this loop.
+    foreach (var extinguished in world.AdvanceFires(1))
+    {
+        _ = store.SaveStructureFuelAsync(extinguished.Id, extinguished.FuelTicks);
+        writer.Reset();
+        WriteStructureFuelChanged(writer, extinguished.Id, lit: false);
+        Broadcast(writer);
+    }
+
     if (players.Count > 0)
     {
         writer.Reset();
@@ -465,4 +506,12 @@ static void WriteStructurePlaced(NetDataWriter data, Structure structure)
     data.Put((byte)structure.Kind);
     data.Put(structure.TileX);
     data.Put(structure.TileY);
+    data.Put(structure.Lit);
+}
+
+static void WriteStructureFuelChanged(NetDataWriter data, long structureId, bool lit)
+{
+    data.Put((byte)MessageId.StructureFuelChanged);
+    data.Put(structureId);
+    data.Put(lit);
 }

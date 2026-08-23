@@ -52,6 +52,7 @@ public partial class SurvivalHud : Control
 
     private VBoxContainer _gatherPrompt = null!;
     private TextureRect _gatherIcon = null!;
+    private Label _gatherLabel = null!;
 
     private Control _hudLayer = null!;
     private VirtualJoystick _joystick = null!;
@@ -356,22 +357,25 @@ public partial class SurvivalHud : Control
         chipRow.AddThemeConstantOverride("separation", 6);
         _gatherIcon = PixelIcons.Make("wood", 16);
         chipRow.AddChild(_gatherIcon);
-        var label = DesignSystem.Kicker("TAP TO GATHER", DesignSystem.EmberLight, 9);
-        label.VerticalAlignment = VerticalAlignment.Center;
-        chipRow.AddChild(label);
+        _gatherLabel = DesignSystem.Kicker("TAP TO GATHER", DesignSystem.EmberLight, 9);
+        _gatherLabel.VerticalAlignment = VerticalAlignment.Center;
+        chipRow.AddChild(_gatherLabel);
         chip.AddChild(chipRow);
         _gatherPrompt.AddChild(chip);
 
         _hudLayer.AddChild(_gatherPrompt);
     }
 
-    /// <summary>Floats the gather reticle over a resource the world has resolved as
-    /// in reach; <paramref name="screen"/> is HUD-space (window) coordinates. Hidden
+    /// <summary>Floats the gather reticle over a resource or interactable the world
+    /// has resolved as in reach; <paramref name="screen"/> is HUD-space (window)
+    /// coordinates, <paramref name="icon"/> the item it shows, and
+    /// <paramref name="label"/> the verb ("TAP TO GATHER", "TAP TO STOKE"). Hidden
     /// while the action menu is open so it never fights the sheet.</summary>
-    public void ShowGatherPrompt(Vector2 screen, ItemId yield)
+    public void ShowGatherPrompt(Vector2 screen, ItemId icon, string label = "TAP TO GATHER")
     {
         if (_toggle.ButtonPressed) { _gatherPrompt.Visible = false; return; }
-        _gatherIcon.Texture = PixelIcons.Texture(PixelIcons.NameOf(yield));
+        _gatherIcon.Texture = PixelIcons.Texture(PixelIcons.NameOf(icon));
+        _gatherLabel.Text = label;
         _gatherPrompt.Position = screen - new Vector2(PromptWidth / 2f, ReticleBox / 2f);
         _gatherPrompt.Visible = true;
     }

@@ -55,7 +55,8 @@ the `WorldConnection` node for LAN or VPS testing.
 - **Items** tab lists what you carry; edible forage (berries) shows an **Eat**
   button that restores hunger.
 - **Warmth** bar falls at night unless you stand near a lit **Campfire** (build
-  one from the Build tab); let it hit zero and your health bleeds.
+  one from the Build tab); let it hit zero and your health bleeds. A campfire
+  burns down over time — tap a cold one (holding Wood) to stoke it back to life.
 - Holding the right **tool** gathers more: an Axe boosts wood from trees, a
   Pickaxe boosts stone from rock. Bare hands still work, just for less.
 
@@ -122,6 +123,13 @@ mobile UI pass.
   `World.HasWarmthNear`). An empty warmth meter bleeds health on top of any
   starvation — so surviving the night means gathering by day and sheltering by
   a fire after dark.
+- **a campfire is fuel, not furniture** (`sim-core/FireRules`): it starts lit with
+  the wood spent building it and burns down tick by tick; tapping a cold one
+  feeds it a held Wood log (reusing the same tap-to-interact gesture as
+  harvesting) and its flame and light visibly go out and relight in step. An
+  untended fire stops radiating warmth, so a group sheltering by one has to
+  keep it fed through the night rather than build-once-and-forget — the first
+  system in the game that gives players a reason to actually cooperate.
 
 **Design system + pixel-art pass (in progress)** — the client now dresses in the
 Ashfall design system (`scripts/ui/DesignSystem.cs`): the Ink/Ember palette,

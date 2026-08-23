@@ -102,7 +102,7 @@ public sealed class WorldStore : IAsyncDisposable
         if (_db is null) return 0;
 
         await using var cmd = _db.CreateCommand(
-            "SELECT id, tile_x, tile_y, kind FROM structure WHERE world_id = $1");
+            "SELECT id, tile_x, tile_y, kind, fuel_ticks FROM structure WHERE world_id = $1");
         cmd.Parameters.AddWithValue(_worldId);
 
         int count = 0;
@@ -113,7 +113,8 @@ public sealed class WorldStore : IAsyncDisposable
             int tileX = reader.GetInt32(1);
             int tileY = reader.GetInt32(2);
             var kind = Enum.Parse<ItemId>(reader.GetString(3));
-            world.LoadStructure(new Structure(id, tileX, tileY, kind));
+            int fuelTicks = reader.GetInt32(4);
+            world.LoadStructure(new Structure(id, tileX, tileY, kind, fuelTicks));
             count++;
         }
         return count;
@@ -130,8 +131,8 @@ public sealed class WorldStore : IAsyncDisposable
 
         var chunk = World.ChunkOf(structure.TileX, structure.TileY);
         await using var cmd = _db.CreateCommand("""
-            INSERT INTO structure (id, world_id, chunk_x, chunk_y, tile_x, tile_y, kind)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO structure (id, world_id, chunk_x, chunk_y, tile_x, tile_y, kind, fuel_ticks)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (id) DO NOTHING
             """);
         cmd.Parameters.AddWithValue(structure.Id);
@@ -141,6 +142,23 @@ public sealed class WorldStore : IAsyncDisposable
         cmd.Parameters.AddWithValue(structure.TileX);
         cmd.Parameters.AddWithValue(structure.TileY);
         cmd.Parameters.AddWithValue(structure.Kind.ToString());
+        cmd.Parameters.AddWithValue(structure.FuelTicks);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Updates a burning structure's stored fuel level. Written on a feed and on
+    /// the tick a fire goes cold — not every tick, so an untended fire slowly
+    /// draining down costs no database writes until something actually changes.
+    /// </summary>
+    public async Task SaveStructureFuelAsync(long structureId, int fuelTicks)
+    {
+        if (_db is null) return;
+
+        await using var cmd = _db.CreateCommand(
+            "UPDATE structure SET fuel_ticks = $2 WHERE id = $1");
+        cmd.Parameters.AddWithValue(structureId);
+        cmd.Parameters.AddWithValue(fuelTicks);
         await cmd.ExecuteNonQueryAsync();
     }
 
