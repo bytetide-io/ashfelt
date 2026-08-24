@@ -116,12 +116,22 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // wait, and seeding synchronously keeps the inventory the tick loop
             // reads free of cross-thread mutation. Saves, by contrast, are
             // fire-and-forget so a leaving player never stalls the others.
+            //
+            // The claim is unconditional even after a voyage ticket claim above:
+            // ownership already matches this world in that case, so the claim is
+            // a no-op confirmation rather than a second handoff.
             try
             {
-                var character = gateway.GetCharacterAsync(player.CharacterId).GetAwaiter().GetResult();
-                if (character is not null) player.LoadCharacter(character);
-                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} " +
-                                  (character is null ? "is new" : "loaded"));
+                var character = gateway.ClaimCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
+                if (character is null)
+                {
+                    Console.WriteLine($"[world] rejecting join for {player.CharacterId}: " +
+                                      "owned by another world (reconnect there, or voyage)");
+                    peer.Disconnect();
+                    break;
+                }
+                player.LoadCharacter(character);
+                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} claimed");
             }
             catch (Exception ex)
             {

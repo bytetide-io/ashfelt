@@ -21,12 +21,22 @@ Stub world registry (Phase 3 will make it live).
 [ { "id": "continent-a", "host": "127.0.0.1", "port": 9050 } ]
 ```
 
-## GET /characters/{id}
+## POST /characters/{id}/claim
 
-Load a character by its device UUID. Inventory is keyed by the stable `ItemId`
-enum name; the three meters are display points (0..100).
+Claim ownership of a character for a world and load it. A character is owned
+by exactly one world-server at a time (see `docs/voyage-transfer.md`); this
+atomically takes ownership when nobody holds it yet or the caller already
+does, and creates the row (with default meters) on a brand-new UUID. Inventory
+is keyed by the stable `ItemId` enum name; the meters are display points
+(0..100). Called by a world-server at Hello — never by the client.
 
 - `id` — UUID (path).
+- `worldId` — the claiming world's id (body).
+
+```json
+POST /characters/6f9619ff-8b86-d011-b42d-00cf4fc964ff/claim
+{ "worldId": "continent-a" }
+```
 
 ```json
 200 OK
@@ -34,12 +44,13 @@ enum name; the three meters are display points (0..100).
   "inventory": { "Wood": 12, "Stone": 3 },
   "hunger": 87,
   "stamina": 100,
-  "health": 100
+  "health": 100,
+  "warmth": 100
 }
 ```
 
 ```
-404 Not Found   — no character stored for this UUID yet (start fresh)
+409 Conflict   — owned by a different world; the join must be denied
 ```
 
 ## PUT /characters/{id}
