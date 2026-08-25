@@ -26,6 +26,25 @@ public enum MoveRejection
     FellTooFast,
     BelowTerrain,
     TooHighAboveTerrain,
+    /// <summary>The move ended inside, or crossed into, a solid obstacle.</summary>
+    Blocked,
+}
+
+/// <summary>
+/// The solid things a player cannot move through, queried by tile. Kept an
+/// abstraction so <see cref="MovementRules"/> stays free of world and structure
+/// types: the server implements it over live terrain, structures and built
+/// pieces, and a test can stub it. Both client prediction and server authority
+/// read the same rule, so an honest player is never wrongly blocked.
+/// </summary>
+public interface IMovementObstacles
+{
+    /// <summary>False when a solid obstacle fills the tile (a tree, a blocking structure).</summary>
+    bool Walkable(int tileX, int tileY);
+
+    /// <summary>True when a built wall stands on the edge shared by two orthogonally
+    /// adjacent tiles, so stepping straight from one to the other is refused.</summary>
+    bool EdgeBlocked(int fromX, int fromY, int toX, int toY);
 }
 
 /// <summary>
@@ -61,7 +80,8 @@ public static class MovementRules
     /// player's last accepted position, so a client cannot gain distance by
     /// reporting more often.
     /// </summary>
-    public static MoveRejection Check(TerrainGenerator terrain, Vec3 from, Vec3 to, double delta)
+    public static MoveRejection Check(
+        TerrainGenerator terrain, Vec3 from, Vec3 to, double delta, IMovementObstacles? obstacles = null)
     {
         if (delta < MinTimestep) delta = MinTimestep;
 
@@ -81,7 +101,27 @@ public static class MovementRules
         if (to.Y < surface - GroundTolerance) return MoveRejection.BelowTerrain;
         if (to.Y > surface + MaxAirborneHeight) return MoveRejection.TooHighAboveTerrain;
 
+        if (obstacles is not null && ObstructsMove(from, to, obstacles))
+            return MoveRejection.Blocked;
+
         return MoveRejection.None;
+    }
+
+    /// <summary>
+    /// Whether solid obstacles refuse the move: the destination tile is filled, or
+    /// the move steps across a walled edge. Only orthogonally adjacent single-tile
+    /// steps are edge-tested — a wider jump is bounded by the destination-tile
+    /// check, and the client's own physics stops honest players short of a wall.
+    /// </summary>
+    private static bool ObstructsMove(Vec3 from, Vec3 to, IMovementObstacles obstacles)
+    {
+        var (fx, fy) = TileOf(from);
+        var (tx, ty) = TileOf(to);
+
+        if (!obstacles.Walkable(tx, ty)) return true;
+
+        bool adjacent = Math.Abs(tx - fx) + Math.Abs(ty - fy) == 1;
+        return adjacent && obstacles.EdgeBlocked(fx, fy, tx, ty);
     }
 
     /// <summary>Terrain height in metres beneath a world position.</summary>

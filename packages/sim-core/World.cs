@@ -121,6 +121,10 @@ public sealed class World
     /// <summary>Removes the structure at a tile, if any. Returns whether one was there.</summary>
     public bool RemoveStructure(int tileX, int tileY) => _structures.TryRemove((tileX, tileY), out _);
 
+    /// <summary>True when a movement-blocking structure (a wall) sits on the tile.</summary>
+    public bool HasBlockingStructureAt(int tileX, int tileY) =>
+        _structures.TryGetValue((tileX, tileY), out var structure) && PlacementRules.Blocks(structure.Kind);
+
     /// <summary>
     /// True when <paramref name="position"/> lies within the warmth radius of any
     /// heat-providing structure (a lit campfire). Horizontal distance only, so a
