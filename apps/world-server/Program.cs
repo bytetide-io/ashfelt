@@ -89,472 +89,485 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 {
     if (!players.TryGetValue(peer, out var player)) { reader.Recycle(); return; }
 
-    var id = (MessageId)reader.GetByte();
-    switch (id)
+    // A malformed or truncated packet -- a buggy client, a version mismatch,
+    // or a deliberately hostile one -- must never take down the single tick
+    // loop every other connected player shares. Wrapping parse+dispatch means
+    // one bad payload disconnects its sender instead of ending the session for
+    // everyone else still on this thread.
+    try
     {
-        case MessageId.Hello:
+        var id = (MessageId)reader.GetByte();
+        switch (id)
         {
-            int clientVersion = reader.GetInt();
-            if (clientVersion != ProtocolVersion.Current)
+            case MessageId.Hello:
             {
-                Console.WriteLine($"[world] rejecting client with proto v{clientVersion}");
-                peer.Disconnect();
-                break;
-            }
-
-            var uuidBytes = new byte[16];
-            reader.GetBytes(uuidBytes, 16);
-            var characterId = new Guid(uuidBytes);
-
-            // A second live connection presenting the same character UUID — same
-            // world twice, most simply a double-connect during a flaky reconnect —
-            // would otherwise load a second, independent in-memory copy of one
-            // inventory: two Player objects, each free to spend the same starting
-            // items. Reject outright rather than risk two sessions mutating one
-            // character.
-            if (players.Values.Any(p => p != player && p.CharacterId == characterId))
-            {
-                Console.WriteLine($"[world] rejecting duplicate connection for character {characterId}");
-                peer.Disconnect();
-                break;
-            }
-            player.CharacterId = characterId;
-
-            string ticketText = reader.GetString();
-
-            // A voyage arrival carries a ticket: this server must claim ownership
-            // before it may load the character. A failed claim (expired, forged,
-            // already used) means the character is not ours to load — reject the
-            // join rather than risk two worlds owning one character. A normal join
-            // has an empty ticket and claims below instead.
-            if (ticketText.Length > 0)
-            {
-                bool claimed = Guid.TryParse(ticketText, out var ticket)
-                    && gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId)
-                        .GetAwaiter().GetResult();
-                if (!claimed)
+                int clientVersion = reader.GetInt();
+                if (clientVersion != ProtocolVersion.Current)
                 {
-                    Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
+                    Console.WriteLine($"[world] rejecting client with proto v{clientVersion}");
                     peer.Disconnect();
                     break;
                 }
-                Console.WriteLine($"[world] claimed voyaging character {player.CharacterId}");
-            }
 
-            // Load happens at Hello (not connect) because the UUID is only known
-            // now. Blocking the loop here is deliberate: joining is inherently a
-            // wait, and seeding synchronously keeps the inventory the tick loop
-            // reads free of cross-thread mutation. Saves, by contrast, are
-            // fire-and-forget so a leaving player never stalls the others.
-            //
-            // Claiming (not a plain load) is what makes this world the character's
-            // sole owner for the session: a voyage arrival is already owned by us
-            // from the ticket claim above and this call is then a same-world
-            // no-op; a normal join claims for the first time. Either way, a
-            // denied or failed claim must not let the player in — proceeding with
-            // default state on a transient gateway error would silently reset (and
-            // then overwrite-on-save) whatever the gateway actually holds.
-            CharacterState? character;
-            try
-            {
-                character = gateway.ClaimCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[world] character claim failed for {player.CharacterId}: {ex.Message}");
-                peer.Disconnect();
-                break;
-            }
-            if (character is null)
-            {
-                Console.WriteLine($"[world] rejecting join for {player.CharacterId}: owned by another world");
-                peer.Disconnect();
-                break;
-            }
-            player.LoadCharacter(character);
-            Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} claimed");
+                var uuidBytes = new byte[16];
+                reader.GetBytes(uuidBytes, 16);
+                var characterId = new Guid(uuidBytes);
 
-            writer.Reset();
-            writer.Put((byte)MessageId.Welcome);
-            writer.Put(ProtocolVersion.Current);
-            writer.Put(seed);
-            writer.Put(TerrainGenerator.ChunkSize);
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            player.InventoryDirty = true;
-
-            // Backfill every tile diff already recorded — trees felled, rocks
-            // broken, shrubs stripped — before this player connected. Without this
-            // a joining client renders those nodes as pristine forever: the server
-            // holds the diffed tile and silently refuses to re-harvest it, so the
-            // node just never falls no matter how many times it's tapped.
-            foreach (var diff in world.Diffs)
-            {
-                writer.Reset();
-                writer.Put((byte)MessageId.TileChanged);
-                writer.Put(diff.Key.X);
-                writer.Put(diff.Key.Y);
-                writer.Put((byte)diff.Value);
-                peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            }
-
-            // Backfill the already-built world so a joining player sees every
-            // structure, not just the ones placed after they arrived.
-            foreach (var structure in world.Structures)
-            {
-                writer.Reset();
-                WriteStructurePlaced(writer, structure);
-                peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            }
-
-            // Backfill build sites: everyone sees the *built* pieces of every site
-            // (public world state), but only the owner receives the full blueprint
-            // — its pending hologram and its stockpile are private to them.
-            foreach (var site in buildSites.Values)
-            {
-                if (site.Owner == player.CharacterId)
+                // A second live connection presenting the same character UUID — same
+                // world twice, most simply a double-connect during a flaky reconnect —
+                // would otherwise load a second, independent in-memory copy of one
+                // inventory: two Player objects, each free to spend the same starting
+                // items. Reject outright rather than risk two sessions mutating one
+                // character.
+                if (players.Values.Any(p => p != player && p.CharacterId == characterId))
                 {
-                    SendBlueprintState(player, site);
+                    Console.WriteLine($"[world] rejecting duplicate connection for character {characterId}");
+                    peer.Disconnect();
+                    break;
+                }
+                player.CharacterId = characterId;
+
+                string ticketText = reader.GetString();
+
+                // A voyage arrival carries a ticket: this server must claim ownership
+                // before it may load the character. A failed claim (expired, forged,
+                // already used) means the character is not ours to load — reject the
+                // join rather than risk two worlds owning one character. A normal join
+                // has an empty ticket and claims below instead.
+                if (ticketText.Length > 0)
+                {
+                    bool claimed = Guid.TryParse(ticketText, out var ticket)
+                        && gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId)
+                            .GetAwaiter().GetResult();
+                    if (!claimed)
+                    {
+                        Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
+                        peer.Disconnect();
+                        break;
+                    }
+                    Console.WriteLine($"[world] claimed voyaging character {player.CharacterId}");
+                }
+
+                // Load happens at Hello (not connect) because the UUID is only known
+                // now. Blocking the loop here is deliberate: joining is inherently a
+                // wait, and seeding synchronously keeps the inventory the tick loop
+                // reads free of cross-thread mutation. Saves, by contrast, are
+                // fire-and-forget so a leaving player never stalls the others.
+                //
+                // Claiming (not a plain load) is what makes this world the character's
+                // sole owner for the session: a voyage arrival is already owned by us
+                // from the ticket claim above and this call is then a same-world
+                // no-op; a normal join claims for the first time. Either way, a
+                // denied or failed claim must not let the player in — proceeding with
+                // default state on a transient gateway error would silently reset (and
+                // then overwrite-on-save) whatever the gateway actually holds.
+                CharacterState? character;
+                try
+                {
+                    character = gateway.ClaimCharacterAsync(player.CharacterId, worldId).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[world] character claim failed for {player.CharacterId}: {ex.Message}");
+                    peer.Disconnect();
+                    break;
+                }
+                if (character is null)
+                {
+                    Console.WriteLine($"[world] rejecting join for {player.CharacterId}: owned by another world");
+                    peer.Disconnect();
+                    break;
+                }
+                player.LoadCharacter(character);
+                Console.WriteLine($"[world] player {player.Id} character {player.CharacterId} claimed");
+
+                writer.Reset();
+                writer.Put((byte)MessageId.Welcome);
+                writer.Put(ProtocolVersion.Current);
+                writer.Put(seed);
+                writer.Put(TerrainGenerator.ChunkSize);
+                writer.Put(player.Id);
+                writer.Put((float)player.Position.X);
+                writer.Put((float)player.Position.Y);
+                writer.Put((float)player.Position.Z);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                player.InventoryDirty = true;
+
+                // Backfill every tile diff already recorded — trees felled, rocks
+                // broken, shrubs stripped — before this player connected. Without this
+                // a joining client renders those nodes as pristine forever: the server
+                // holds the diffed tile and silently refuses to re-harvest it, so the
+                // node just never falls no matter how many times it's tapped.
+                foreach (var diff in world.Diffs)
+                {
+                    writer.Reset();
+                    writer.Put((byte)MessageId.TileChanged);
+                    writer.Put(diff.Key.X);
+                    writer.Put(diff.Key.Y);
+                    writer.Put((byte)diff.Value);
+                    peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                }
+
+                // Backfill the already-built world so a joining player sees every
+                // structure, not just the ones placed after they arrived.
+                foreach (var structure in world.Structures)
+                {
+                    writer.Reset();
+                    WriteStructurePlaced(writer, structure);
+                    peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                }
+
+                // Backfill build sites: everyone sees the *built* pieces of every site
+                // (public world state), but only the owner receives the full blueprint
+                // — its pending hologram and its stockpile are private to them.
+                foreach (var site in buildSites.Values)
+                {
+                    if (site.Owner == player.CharacterId)
+                    {
+                        SendBlueprintState(player, site);
+                    }
+                    else
+                    {
+                        foreach (var piece in site.BuiltPieces)
+                        {
+                            writer.Reset();
+                            WriteBuiltPiece(writer, site.Id, piece);
+                            peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                        }
+                    }
+                }
+                break;
+            }
+
+            case MessageId.RequestChunk:
+            {
+                var coord = new ChunkCoord(reader.GetInt(), reader.GetInt());
+                Console.WriteLine($"[world] player {player.Id} requested chunk ({coord.X},{coord.Y})");
+                // Terrain is regenerated from the seed, with stored diffs layered
+                // on top — chunks themselves are never persisted.
+                var chunk = world.GenerateChunk(coord);
+
+                writer.Reset();
+                writer.Put((byte)MessageId.ChunkData);
+                writer.Put(coord.X);
+                writer.Put(coord.Y);
+                foreach (var tile in chunk.Tiles) writer.Put((byte)tile);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                break;
+            }
+
+            case MessageId.ClientState:
+            {
+                var reported = new Vec3(reader.GetFloat(), reader.GetFloat(), reader.GetFloat());
+                float yaw = reader.GetFloat();
+
+                // The client simulates physics; the server decides whether the
+                // result was possible. Anything else is taken on trust nowhere.
+                var rejection = player.TryAccept(world.Terrain, reported, yaw, Now(), obstacles);
+                if (rejection == MoveRejection.None) break;
+
+                Console.WriteLine($"[world] player {player.Id} move rejected: {rejection}");
+                writer.Reset();
+                writer.Put((byte)MessageId.Correction);
+                writer.Put((float)player.Position.X);
+                writer.Put((float)player.Position.Y);
+                writer.Put((float)player.Position.Z);
+                writer.Put((byte)rejection);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                break;
+            }
+
+            case MessageId.ChopRequest:
+            {
+                int tx = reader.GetInt(), ty = reader.GetInt();
+                if (!player.IsWithinReach(tx, ty))
+                {
+                    Console.WriteLine($"[world] player {player.Id} chop out of range at ({tx},{ty})");
+                    break;
+                }
+
+                // A tool matching the node speeds the gather: resolve the node's
+                // preferred class, then how good a tool of that class the player holds.
+                var preferredTool = HarvestRules.PreferredTool(world.TileAt(tx, ty));
+                int toolTier = player.ToolTierFor(preferredTool);
+                var strike = world.TryHarvest(tx, ty, preferredTool, toolTier);
+                if (!strike.Allowed) break;
+
+                // Every strike drops resource; a tree just takes several before it
+                // falls. Marking the inventory dirty lets the count tick up per hit.
+                player.Give(strike.Item, strike.Amount);
+
+                if (strike.Felled)
+                {
+                    // Fire-and-forget the write: the diff is already authoritative in
+                    // memory, and stalling the packet loop on the database would stall
+                    // every other player.
+                    _ = store.SaveDiffAsync(tx, ty, strike.Becomes);
+
+                    writer.Reset();
+                    writer.Put((byte)MessageId.TileChanged);
+                    writer.Put(tx);
+                    writer.Put(ty);
+                    writer.Put((byte)strike.Becomes);
+                    Broadcast(writer);
                 }
                 else
                 {
-                    foreach (var piece in site.BuiltPieces)
-                    {
-                        writer.Reset();
-                        WriteBuiltPiece(writer, site.Id, piece);
-                        peer.Send(writer, DeliveryMethod.ReliableOrdered);
-                    }
+                    // Not felled yet: tell everyone how worn the node is so it visibly
+                    // wears down under the strikes. This is transient — never persisted.
+                    writer.Reset();
+                    writer.Put((byte)MessageId.HarvestProgress);
+                    writer.Put(tx);
+                    writer.Put(ty);
+                    writer.Put((byte)strike.StrikesLeft);
+                    writer.Put((byte)strike.StrikesTotal);
+                    Broadcast(writer);
                 }
-            }
-            break;
-        }
 
-        case MessageId.RequestChunk:
-        {
-            var coord = new ChunkCoord(reader.GetInt(), reader.GetInt());
-            Console.WriteLine($"[world] player {player.Id} requested chunk ({coord.X},{coord.Y})");
-            // Terrain is regenerated from the seed, with stored diffs layered
-            // on top — chunks themselves are never persisted.
-            var chunk = world.GenerateChunk(coord);
-
-            writer.Reset();
-            writer.Put((byte)MessageId.ChunkData);
-            writer.Put(coord.X);
-            writer.Put(coord.Y);
-            foreach (var tile in chunk.Tiles) writer.Put((byte)tile);
-            peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            break;
-        }
-
-        case MessageId.ClientState:
-        {
-            var reported = new Vec3(reader.GetFloat(), reader.GetFloat(), reader.GetFloat());
-            float yaw = reader.GetFloat();
-
-            // The client simulates physics; the server decides whether the
-            // result was possible. Anything else is taken on trust nowhere.
-            var rejection = player.TryAccept(world.Terrain, reported, yaw, Now(), obstacles);
-            if (rejection == MoveRejection.None) break;
-
-            Console.WriteLine($"[world] player {player.Id} move rejected: {rejection}");
-            writer.Reset();
-            writer.Put((byte)MessageId.Correction);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            writer.Put((byte)rejection);
-            peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            break;
-        }
-
-        case MessageId.ChopRequest:
-        {
-            int tx = reader.GetInt(), ty = reader.GetInt();
-            if (!player.IsWithinReach(tx, ty))
-            {
-                Console.WriteLine($"[world] player {player.Id} chop out of range at ({tx},{ty})");
+                Console.WriteLine($"[world] player {player.Id} struck {strike.Item} at ({tx},{ty}) " +
+                                  (strike.Felled ? "(felled)" : $"({strike.StrikesLeft} left)"));
                 break;
             }
 
-            // A tool matching the node speeds the gather: resolve the node's
-            // preferred class, then how good a tool of that class the player holds.
-            var preferredTool = HarvestRules.PreferredTool(world.TileAt(tx, ty));
-            int toolTier = player.ToolTierFor(preferredTool);
-            var strike = world.TryHarvest(tx, ty, preferredTool, toolTier);
-            if (!strike.Allowed) break;
-
-            // Every strike drops resource; a tree just takes several before it
-            // falls. Marking the inventory dirty lets the count tick up per hit.
-            player.Give(strike.Item, strike.Amount);
-
-            if (strike.Felled)
+            case MessageId.CraftRequest:
             {
-                // Fire-and-forget the write: the diff is already authoritative in
-                // memory, and stalling the packet loop on the database would stall
-                // every other player.
-                _ = store.SaveDiffAsync(tx, ty, strike.Becomes);
+                var output = (ItemId)reader.GetByte();
+                var craft = CraftingRules.Evaluate(player.Inventory, output);
+                if (!craft.Allowed) break;
+
+                player.ApplyCraft(craft.Deltas);
+                Console.WriteLine($"[world] player {player.Id} crafted {output}");
+                break;
+            }
+
+            case MessageId.EatRequest:
+            {
+                var food = (ItemId)reader.GetByte();
+                if (!player.Eat(food)) break;
+
+                // Echo the restored meters at once so hunger jumps on the bite rather
+                // than waiting for the next heartbeat; the heartbeat still self-heals a
+                // dropped echo.
+                SendStats(player, tick);
+                Console.WriteLine($"[world] player {player.Id} ate {food}");
+                break;
+            }
+
+            case MessageId.PlaceRequest:
+            {
+                var kind = (ItemId)reader.GetByte();
+                int tx = reader.GetInt(), ty = reader.GetInt();
+
+                if (!player.Has(kind))
+                {
+                    Console.WriteLine($"[world] player {player.Id} lacks {kind} to place");
+                    break;
+                }
+                if (!player.IsWithinReach(tx, ty))
+                {
+                    Console.WriteLine($"[world] player {player.Id} place out of range at ({tx},{ty})");
+                    break;
+                }
+
+                var placement = world.TryPlace(tx, ty, kind);
+                if (!placement.Allowed) break;
+
+                player.ConsumeOne(kind);
+                // Fire-and-forget the write: the structure is already authoritative
+                // in memory, exactly as with harvest diffs.
+                _ = store.SaveStructureAsync(placement.Structure);
 
                 writer.Reset();
-                writer.Put((byte)MessageId.TileChanged);
-                writer.Put(tx);
-                writer.Put(ty);
-                writer.Put((byte)strike.Becomes);
+                WriteStructurePlaced(writer, placement.Structure);
                 Broadcast(writer);
-            }
-            else
-            {
-                // Not felled yet: tell everyone how worn the node is so it visibly
-                // wears down under the strikes. This is transient — never persisted.
-                writer.Reset();
-                writer.Put((byte)MessageId.HarvestProgress);
-                writer.Put(tx);
-                writer.Put(ty);
-                writer.Put((byte)strike.StrikesLeft);
-                writer.Put((byte)strike.StrikesTotal);
-                Broadcast(writer);
-            }
 
-            Console.WriteLine($"[world] player {player.Id} struck {strike.Item} at ({tx},{ty}) " +
-                              (strike.Felled ? "(felled)" : $"({strike.StrikesLeft} left)"));
-            break;
-        }
-
-        case MessageId.CraftRequest:
-        {
-            var output = (ItemId)reader.GetByte();
-            var craft = CraftingRules.Evaluate(player.Inventory, output);
-            if (!craft.Allowed) break;
-
-            player.ApplyCraft(craft.Deltas);
-            Console.WriteLine($"[world] player {player.Id} crafted {output}");
-            break;
-        }
-
-        case MessageId.EatRequest:
-        {
-            var food = (ItemId)reader.GetByte();
-            if (!player.Eat(food)) break;
-
-            // Echo the restored meters at once so hunger jumps on the bite rather
-            // than waiting for the next heartbeat; the heartbeat still self-heals a
-            // dropped echo.
-            SendStats(player, tick);
-            Console.WriteLine($"[world] player {player.Id} ate {food}");
-            break;
-        }
-
-        case MessageId.PlaceRequest:
-        {
-            var kind = (ItemId)reader.GetByte();
-            int tx = reader.GetInt(), ty = reader.GetInt();
-
-            if (!player.Has(kind))
-            {
-                Console.WriteLine($"[world] player {player.Id} lacks {kind} to place");
-                break;
-            }
-            if (!player.IsWithinReach(tx, ty))
-            {
-                Console.WriteLine($"[world] player {player.Id} place out of range at ({tx},{ty})");
+                Console.WriteLine($"[world] player {player.Id} placed {kind} at ({tx},{ty})");
                 break;
             }
 
-            var placement = world.TryPlace(tx, ty, kind);
-            if (!placement.Allowed) break;
-
-            player.ConsumeOne(kind);
-            // Fire-and-forget the write: the structure is already authoritative
-            // in memory, exactly as with harvest diffs.
-            _ = store.SaveStructureAsync(placement.Structure);
-
-            writer.Reset();
-            WriteStructurePlaced(writer, placement.Structure);
-            Broadcast(writer);
-
-            Console.WriteLine($"[world] player {player.Id} placed {kind} at ({tx},{ty})");
-            break;
-        }
-
-        case MessageId.CommitBlueprint:
-        {
-            int count = reader.GetUShort();
-            var pieces = new List<PlannedPiece>(count);
-            for (int i = 0; i < count; i++)
+            case MessageId.CommitBlueprint:
             {
-                var kind = (BuildPieceKind)reader.GetByte();
-                var material = (BuildMaterial)reader.GetByte();
-                int px = reader.GetInt(), py = reader.GetInt(), level = reader.GetInt();
-                var layer = (PieceLayer)reader.GetByte();
-                pieces.Add(new PlannedPiece(kind, material, PieceSlot.Canonical(px, py, level, layer)));
-            }
-            if (pieces.Count == 0) break;
+                int count = reader.GetUShort();
+                var pieces = new List<PlannedPiece>(count);
+                for (int i = 0; i < count; i++)
+                {
+                    var kind = (BuildPieceKind)reader.GetByte();
+                    var material = (BuildMaterial)reader.GetByte();
+                    int px = reader.GetInt(), py = reader.GetInt(), level = reader.GetInt();
+                    var layer = (PieceLayer)reader.GetByte();
+                    pieces.Add(new PlannedPiece(kind, material, PieceSlot.Canonical(px, py, level, layer)));
+                }
+                if (pieces.Count == 0) break;
 
-            // The client predicts validity, but the server is the authority: an
-            // illegal plan (unsupported piece, bad layer, aliased slot, off
-            // buildable ground) is refused outright rather than half-built.
-            var validation = BuildingRules.Validate(pieces, GroundBuildable);
-            if (!validation.Ok)
-            {
-                Console.WriteLine($"[world] player {player.Id} committed an invalid blueprint " +
-                                  $"({validation.Problems.Count} problem(s))");
-                break;
-            }
+                // The client predicts validity, but the server is the authority: an
+                // illegal plan (unsupported piece, bad layer, aliased slot, off
+                // buildable ground) is refused outright rather than half-built.
+                var validation = BuildingRules.Validate(pieces, GroundBuildable);
+                if (!validation.Ok)
+                {
+                    Console.WriteLine($"[world] player {player.Id} committed an invalid blueprint " +
+                                      $"({validation.Problems.Count} problem(s))");
+                    break;
+                }
 
-            var site = new BuildSite(nextSiteId++, player.CharacterId, pieces);
-            buildSites[site.Id] = site;
-            _ = store.SaveBlueprintAsync(site);
+                var site = new BuildSite(nextSiteId++, player.CharacterId, pieces);
+                buildSites[site.Id] = site;
+                _ = store.SaveBlueprintAsync(site);
 
-            SendBlueprintState(player, site);
-            Console.WriteLine($"[world] player {player.Id} committed blueprint {site.Id} ({site.PieceCount} pieces)");
-            break;
-        }
-
-        case MessageId.DepositRequest:
-        {
-            long siteId = reader.GetLong();
-            var item = (ItemId)reader.GetByte();
-            int amount = reader.GetInt();
-
-            if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
-
-            // Take only what the site needs and only what the player holds; the
-            // site refuses the rest, so nothing is lost from the player's stack.
-            int held = player.Inventory.GetValueOrDefault(item);
-            int taken = site.Deposit(item, Math.Min(amount, held));
-            if (taken <= 0) break;
-
-            player.Take(item, taken);
-            _ = store.SaveStorageAsync(siteId, item, site.Storage.GetValueOrDefault(item));
-            SendBlueprintState(player, site);
-            Console.WriteLine($"[world] player {player.Id} deposited {taken} {item} into site {siteId}");
-            break;
-        }
-
-        case MessageId.BuildRequest:
-        {
-            long siteId = reader.GetLong();
-            if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
-
-            var next = site.PeekNextBuildable(GroundBuildable);
-            if (next is not { } target) break;
-            if (!player.IsWithinReach(target.Slot.X, target.Slot.Y))
-            {
-                Console.WriteLine($"[world] player {player.Id} build out of range at ({target.Slot.X},{target.Slot.Y})");
-                break;
-            }
-
-            var strike = site.TryBuildAt(target.Slot, GroundBuildable);
-            if (!strike.Acted) break;
-
-            if (strike.Completed)
-            {
-                _ = store.SavePieceBuiltAsync(siteId, target.Slot);
-                // Materials were consumed on the completing strike: persist the
-                // stockpile lines the piece drew from.
-                if (StructureCatalog.TryGet(target.Kind, target.Material, out var def))
-                    foreach (var line in def.Cost)
-                        _ = store.SaveStorageAsync(siteId, line.Item, site.Storage.GetValueOrDefault(line.Item));
-
-                // A completed piece is public: everyone sees it appear.
-                writer.Reset();
-                WriteBuildProgress(writer, siteId, strike);
-                Broadcast(writer);
                 SendBlueprintState(player, site);
-                Console.WriteLine($"[world] player {player.Id} built {target.Kind} on site {siteId}" +
-                                  (site.IsComplete ? " (complete)" : ""));
-            }
-            else
-            {
-                // A partial strike wears an unbuilt piece up — private to the owner,
-                // since only they can see the pending hologram.
-                writer.Reset();
-                WriteBuildProgress(writer, siteId, strike);
-                player.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            }
-            break;
-        }
-
-        case MessageId.CancelBlueprint:
-        {
-            long siteId = reader.GetLong();
-            if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
-
-            // Tear it down: the stockpile returns to the owner, and every piece —
-            // built or pending — is removed from the shared world.
-            foreach (var (item, amount) in site.Storage) player.Give(item, amount);
-            buildSites.Remove(siteId);
-            _ = store.DeleteBlueprintAsync(siteId);
-
-            writer.Reset();
-            writer.Put((byte)MessageId.BuildSiteRemoved);
-            writer.Put(siteId);
-            Broadcast(writer);
-            Console.WriteLine($"[world] player {player.Id} cancelled site {siteId}");
-            break;
-        }
-
-        case MessageId.RequestRelease:
-        {
-            string targetWorldId = reader.GetString();
-
-            void Deny(string reason)
-            {
-                Console.WriteLine($"[world] release denied for player {player.Id}: {reason}");
-                writer.Reset();
-                writer.Put((byte)MessageId.ReleaseDenied);
-                writer.Put(reason);
-                peer.Send(writer, DeliveryMethod.ReliableOrdered);
-            }
-
-            if (player.CharacterId == Guid.Empty) { Deny("no character"); break; }
-
-            // Save synchronously first: the gateway must hold the authoritative
-            // state before any world can claim it, or a voyage could load stale
-            // inventory. Only then mint the ticket. Blocking the loop is deliberate
-            // — a release is a rare, deliberate act, not a per-tick path.
-            VoyageGrant? grant;
-            try
-            {
-                gateway.SaveCharacterAsync(player.CharacterId, player.ToCharacterState())
-                    .GetAwaiter().GetResult();
-                grant = gateway.RequestVoyageAsync(player.CharacterId, worldId, targetWorldId)
-                    .GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                Deny($"gateway unreachable: {ex.Message}");
+                Console.WriteLine($"[world] player {player.Id} committed blueprint {site.Id} ({site.PieceCount} pieces)");
                 break;
             }
 
-            if (grant is null) { Deny($"target '{targetWorldId}' unavailable"); break; }
+            case MessageId.DepositRequest:
+            {
+                long siteId = reader.GetLong();
+                var item = (ItemId)reader.GetByte();
+                int amount = reader.GetInt();
 
-            // Grant, then relinquish: tell the client where to go, then remove the
-            // entity so this server no longer owns it. The gateway already cleared
-            // ownership to in-transit, so the two states never contradict.
-            writer.Reset();
-            writer.Put((byte)MessageId.ReleaseGranted);
-            writer.Put(grant.TargetHost);
-            writer.Put(grant.TargetPort);
-            writer.Put(grant.Ticket.ToString());
-            peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
 
-            players.Remove(peer);
-            Console.WriteLine($"[world] released player {player.Id} ({player.CharacterId}) " +
-                              $"to {targetWorldId} at {grant.TargetHost}:{grant.TargetPort}");
+                // Take only what the site needs and only what the player holds; the
+                // site refuses the rest, so nothing is lost from the player's stack.
+                int held = player.Inventory.GetValueOrDefault(item);
+                int taken = site.Deposit(item, Math.Min(amount, held));
+                if (taken <= 0) break;
 
-            writer.Reset();
-            writer.Put((byte)MessageId.PlayerLeft);
-            writer.Put(player.Id);
-            Broadcast(writer, exclude: peer);
-            break;
+                player.Take(item, taken);
+                _ = store.SaveStorageAsync(siteId, item, site.Storage.GetValueOrDefault(item));
+                SendBlueprintState(player, site);
+                Console.WriteLine($"[world] player {player.Id} deposited {taken} {item} into site {siteId}");
+                break;
+            }
+
+            case MessageId.BuildRequest:
+            {
+                long siteId = reader.GetLong();
+                if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
+
+                var next = site.PeekNextBuildable(GroundBuildable);
+                if (next is not { } target) break;
+                if (!player.IsWithinReach(target.Slot.X, target.Slot.Y))
+                {
+                    Console.WriteLine($"[world] player {player.Id} build out of range at ({target.Slot.X},{target.Slot.Y})");
+                    break;
+                }
+
+                var strike = site.TryBuildAt(target.Slot, GroundBuildable);
+                if (!strike.Acted) break;
+
+                if (strike.Completed)
+                {
+                    _ = store.SavePieceBuiltAsync(siteId, target.Slot);
+                    // Materials were consumed on the completing strike: persist the
+                    // stockpile lines the piece drew from.
+                    if (StructureCatalog.TryGet(target.Kind, target.Material, out var def))
+                        foreach (var line in def.Cost)
+                            _ = store.SaveStorageAsync(siteId, line.Item, site.Storage.GetValueOrDefault(line.Item));
+
+                    // A completed piece is public: everyone sees it appear.
+                    writer.Reset();
+                    WriteBuildProgress(writer, siteId, strike);
+                    Broadcast(writer);
+                    SendBlueprintState(player, site);
+                    Console.WriteLine($"[world] player {player.Id} built {target.Kind} on site {siteId}" +
+                                      (site.IsComplete ? " (complete)" : ""));
+                }
+                else
+                {
+                    // A partial strike wears an unbuilt piece up — private to the owner,
+                    // since only they can see the pending hologram.
+                    writer.Reset();
+                    WriteBuildProgress(writer, siteId, strike);
+                    player.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                }
+                break;
+            }
+
+            case MessageId.CancelBlueprint:
+            {
+                long siteId = reader.GetLong();
+                if (!buildSites.TryGetValue(siteId, out var site) || site.Owner != player.CharacterId) break;
+
+                // Tear it down: the stockpile returns to the owner, and every piece —
+                // built or pending — is removed from the shared world.
+                foreach (var (item, amount) in site.Storage) player.Give(item, amount);
+                buildSites.Remove(siteId);
+                _ = store.DeleteBlueprintAsync(siteId);
+
+                writer.Reset();
+                writer.Put((byte)MessageId.BuildSiteRemoved);
+                writer.Put(siteId);
+                Broadcast(writer);
+                Console.WriteLine($"[world] player {player.Id} cancelled site {siteId}");
+                break;
+            }
+
+            case MessageId.RequestRelease:
+            {
+                string targetWorldId = reader.GetString();
+
+                void Deny(string reason)
+                {
+                    Console.WriteLine($"[world] release denied for player {player.Id}: {reason}");
+                    writer.Reset();
+                    writer.Put((byte)MessageId.ReleaseDenied);
+                    writer.Put(reason);
+                    peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                }
+
+                if (player.CharacterId == Guid.Empty) { Deny("no character"); break; }
+
+                // Save synchronously first: the gateway must hold the authoritative
+                // state before any world can claim it, or a voyage could load stale
+                // inventory. Only then mint the ticket. Blocking the loop is deliberate
+                // — a release is a rare, deliberate act, not a per-tick path.
+                VoyageGrant? grant;
+                try
+                {
+                    gateway.SaveCharacterAsync(player.CharacterId, player.ToCharacterState())
+                        .GetAwaiter().GetResult();
+                    grant = gateway.RequestVoyageAsync(player.CharacterId, worldId, targetWorldId)
+                        .GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    Deny($"gateway unreachable: {ex.Message}");
+                    break;
+                }
+
+                if (grant is null) { Deny($"target '{targetWorldId}' unavailable"); break; }
+
+                // Grant, then relinquish: tell the client where to go, then remove the
+                // entity so this server no longer owns it. The gateway already cleared
+                // ownership to in-transit, so the two states never contradict.
+                writer.Reset();
+                writer.Put((byte)MessageId.ReleaseGranted);
+                writer.Put(grant.TargetHost);
+                writer.Put(grant.TargetPort);
+                writer.Put(grant.Ticket.ToString());
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+
+                players.Remove(peer);
+                Console.WriteLine($"[world] released player {player.Id} ({player.CharacterId}) " +
+                                  $"to {targetWorldId} at {grant.TargetHost}:{grant.TargetPort}");
+
+                writer.Reset();
+                writer.Put((byte)MessageId.PlayerLeft);
+                writer.Put(player.Id);
+                Broadcast(writer, exclude: peer);
+                break;
+            }
+
+            default:
+                Console.WriteLine($"[world] unhandled message {id}");
+                break;
         }
-
-        default:
-            Console.WriteLine($"[world] unhandled message {id}");
-            break;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[world] player {player.Id} sent a malformed packet: {ex.Message}");
+        peer.Disconnect();
     }
     reader.Recycle();
 };

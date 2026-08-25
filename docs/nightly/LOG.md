@@ -5,6 +5,125 @@ session — see the routine's prompt for the required shape.
 
 ---
 
+## 2026-08-25 — AUDIT-ONLY (fix, not feature)
+
+**Chose:** Wrapped `apps/world-server/Program.cs`'s per-packet parse+dispatch
+(`NetworkReceiveEvent`) in a try/catch that logs and disconnects the sending
+peer, instead of letting a malformed or truncated packet throw an unhandled
+exception into the single-threaded tick loop.
+
+**Because:** This session's checkout started several commits behind `main`
+(a stale local clone, not fetched before work began) and the first pass of
+tonight's audit was run against that stale snapshot — its output duplicated
+and partly contradicted the real, already-merged 2026-07-24 audit (which had
+already found and fixed a Severity-20 character-duplication bug this session
+completely missed, since it wasn't in the stale checkout). That output was
+discarded via a merge from `origin/main` rather than kept or forced through;
+everything below is against the current, correctly-merged codebase. Lesson
+for future nights, stated plainly so it isn't repeated silently: **fetch and
+merge `origin/main` before reading anything**, every single time, even for
+what looks like the first run.
+
+With the branch corrected, re-auditing focused on what's new since
+2026-07-24: a full blueprint/architect building system, collision, an
+animated character body, and health regen (see `ARCH.md`'s 2026-08-25
+update for what was reviewed and found sound). While reading the new
+`CommitBlueprint` handler — the first message whose payload includes a
+client-declared loop count (`reader.GetUShort()` pieces, each parsed
+field-by-field) — it became clear that a piece count not backed by that many
+actual bytes in the packet makes `NetDataReader`'s `Get*` calls read past
+the buffer. Checked whether this was new to blueprints: it isn't — every
+existing handler (`Hello`, `ChopRequest`, `PlaceRequest`, all the rest) reads
+raw `Get*` with no bounds guard, blueprint's variable-length payload just
+makes the failure trivial to reach instead of merely possible. Nothing in
+this file or the surrounding LiteNetLib usage catches an exception thrown
+inside `NetworkReceiveEvent`; it propagates out of `server.PollEvents()`,
+which the outer `while (!shutdown.IsSet)` tick loop also does not guard —
+so an uncaught exception here crashes the whole process, ending every
+connected player's session at once, not just the sender's. Scored
+**Severity 5 (total process crash, not a rejected action) × Blast radius 5
+(every connected player, on any world, triggered by any one client) = 25**
+— the highest-scoring finding logged in this file so far, and squarely a
+"fix tonight" case under both thresholds. Phase 2 was skipped accordingly.
+
+**Changed:**
+- `apps/world-server/Program.cs` — the body of `NetworkReceiveEvent`
+  (message-id read through the end of the `switch`) is now wrapped in a
+  `try { ... } catch (Exception ex) { log; peer.Disconnect(); }`. No case's
+  internal logic changed; the diff is otherwise a mechanical 4-space reindent
+  of the existing switch body to sit inside the new `try` block (done with a
+  small script operating on exact line boundaries, not retyped by hand, to
+  avoid introducing a transcription error I have no compiler to catch).
+- `docs/nightly/{ARCH,BACKLOG,LOG}.md` — the merge-from-`main` correction
+  above, plus this entry and its backlog/arch notes.
+
+**Risk:** None to any well-formed message — every existing `Get*` call
+already assumed well-formed input, so the only behavior change is what
+happens when that assumption was already being violated: previously an
+unhandled crash for everyone, now a disconnect for just the sender plus a
+log line. No case's business logic, validation, or wire format changed.
+
+**Revert:** `git revert` the commit on this branch touching
+`apps/world-server/Program.cs`. Single file, purely additive control flow —
+fully reversible.
+
+**Verified:** Confirmed the exposure is real by reading `NetDataReader`'s
+call sites in this file (every handler uses raw `Get*`, none of the newer
+`TryGet*`-style bounds-checked variants) and confirming no try/catch existed
+anywhere around the switch before tonight, nor around `server.PollEvents()`
+in the tick loop. After editing: programmatically counted `{`/`}` and `(`/`)`
+balance across the whole file (equal on both sides); read the full diff
+top to bottom, including both new boundaries (the `try {` insertion and the
+`} catch` insertion) and a sample of reindented interior lines (the
+`CommitBlueprint` and `RequestRelease` cases, the latter having its own
+pre-existing nested try/catch, which nests cleanly inside the new outer one
+with no ambiguity); confirmed `Exception`, `Console.Error.WriteLine`, and
+`peer.Disconnect()` are all already used with identical syntax elsewhere in
+this same file, so nothing new was introduced that isn't already a proven
+pattern here; confirmed `player` and the try-scoped `id` are still in scope
+everywhere they're used (the `catch` block only reads `player`, declared
+outside the try; the `default:` case's use of `id` is unchanged, still
+inside the try).
+
+**Not verified — a human must check on a real setup:** *Nothing in this
+repo was built, run, or tested tonight* — same constraint as 2026-07-24,
+confirmed independently: no `dotnet` on `PATH`, and both `apt-get install
+dotnet-sdk-{8,10}.0` and `curl .../dotnet-install.sh` failed (404s through
+the package mirror, 403 from the proxy on the install script). A human
+needs to: (1) `dotnet build`, unverified; (2) `dotnet test
+tests/sim-core.tests` — untouched by this change, should still pass, not
+run; (3) manually confirm normal play is unaffected; (4) manually send a
+deliberately truncated packet (e.g. a `CommitBlueprint` claiming a piece
+count with no matching payload) and confirm that one peer is disconnected
+with a log line, while every other connected player's session continues
+uninterrupted — that's the actual scenario this fix targets and the only
+way to be sure it does what tonight's reasoning says it does.
+
+**Rejected tonight:** Padding out `CommitBlueprint`'s `count` with an
+explicit sane-looking cap — rejected as unneeded once the try/catch removes
+the actual crash risk; the allocation is small either way (bounded by the
+`ushort` wire type) and the cap would be arbitrary, not a real fix. Reattempting
+the still-open, still-20-scoring Hello-blocking-the-tick-loop finding —
+rejected for the same reason 2026-07-24 gave (real architecture change, not
+a one-night fix), more so tonight with no compiler to check an async
+restructuring against. Phase 2 (new feature): skipped per the decision rule,
+a fix-tonight finding existed.
+
+**Added to backlog:** See `docs/nightly/BACKLOG.md`'s 2026-08-25 section —
+tonight's fix logged as `[FIXED]`, plus a note that the new
+`BuildSite`/`BuildingRules` server-authority logic (reviewed and found
+sound) still has zero automated test coverage, same gap as everything else
+in `world-server`/`gateway`.
+
+**Question for the human:** Please double check the CI/tooling situation —
+two nights in a row now have had no working `.NET SDK` and no way to
+install one from inside the sandbox. Until that's fixed, every finding at
+or above the fix-tonight threshold gets a manually-verified-only patch
+instead of a compiler-and-test-verified one, which is a real (if
+necessary) quality tax on this whole routine.
+
+---
+
 ## 2026-07-24 — AUDIT-ONLY (fix, not feature)
 
 **Chose:** Closed a character-duplication hole: the world-server's normal

@@ -145,3 +145,39 @@ working code paths for idiom/pattern, and balance-checking braces/parens.
 A human must run `dotnet build` and `dotnet test tests/sim-core.tests`
 before trusting tonight's diff. See `LOG.md` for exactly what is and isn't
 verified.
+
+## Update — 2026-08-25
+
+A lot landed between the last audit and this one: a full blueprint/architect
+building system (`packages/sim-core/{BuildPieces,BuildSite,BuildingRules,
+StructureCatalog}.cs`, `apps/world-server/WorldObstacles.cs`, the client's
+`Architect*`/`Blueprint*` scripts), collision (trees/walls/structures now
+block movement — `MovementRules.IMovementObstacles`), an animated character
+body, and health regen. `apps/world-server/Program.cs` alone grew from 468
+to 759 lines. The repo map and known-debt list above are from before this —
+worth a proper re-measure next session rather than patched piecemeal here.
+
+**Reviewed the new server-authoritative surface specifically** (this is
+where a new multiplayer-correctness bug would hide): `BuildingRules.Validate`
+rejects an illegal plan server-side before a `BuildSite` is even created;
+`BuildSite.TryBuildAt`/`TryBuildNext` re-check support and stockpile before
+every strike, not just at commit; `CommitBlueprint`/`DepositRequest`/
+`BuildRequest`/`CancelBlueprint` in `Program.cs` all check `site.Owner ==
+player.CharacterId` and reach (`IsWithinReach`) before acting, matching the
+existing harvest/place pattern exactly. `MovementRules.Check` grew an
+`IMovementObstacles` parameter shared by client prediction and server
+authority, with wall-edge blocking deliberately limited to orthogonally
+adjacent single-tile steps (a wider jump is still bounded by the destination
+tile's own walkability check) — reasoned, not accidental. Found nothing
+wrong with any of it.
+
+**What tonight actually fixed** is unrelated to the new features directly,
+but was found while reading the new `CommitBlueprint` handler: see `LOG.md`
+2026-08-25 and `BACKLOG.md`. Short version — `apps/world-server/Program.cs`'s
+message dispatch had no top-level exception guard, so any malformed/short
+packet on *any* message type could throw an unhandled exception straight
+out of the single tick loop and crash the whole process for every connected
+player. `CommitBlueprint` is what made it obvious (it's the first message
+with a client-declared loop count read field-by-field), but the exposure was
+already there on every existing handler. Now caught, logged, and the
+offending peer disconnected — nothing else changed.
