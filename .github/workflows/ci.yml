@@ -21,6 +21,7 @@ jobs:
       - run: dotnet build apps/world-server
       - run: dotnet build apps/gateway
       - run: dotnet test tests/sim-core.tests
+      - run: dotnet test tests/world-server.tests
 
   client:
     name: godot client

@@ -15,7 +15,11 @@ public sealed class GatewayClient
 
     public GatewayClient(string baseUrl)
     {
-        _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        _http = new HttpClient
+        {
+            BaseAddress = new Uri(baseUrl),
+            Timeout = TimeSpan.FromSeconds(Tuning.GatewayTimeoutSeconds),
+        };
     }
 
     /// <summary>
