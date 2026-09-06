@@ -592,19 +592,7 @@ while (!shutdown.IsSet)
 
     if (players.Count > 0)
     {
-        writer.Reset();
-        writer.Put((byte)MessageId.PlayerStates);
-        writer.Put((byte)players.Count);
-        foreach (var player in players.Values)
-        {
-            writer.Put(player.Id);
-            writer.Put((float)player.Position.X);
-            writer.Put((float)player.Position.Y);
-            writer.Put((float)player.Position.Z);
-            writer.Put(player.Yaw);
-        }
-        // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
-        Broadcast(writer, method: DeliveryMethod.Unreliable);
+        foreach (var player in players.Values) SendPlayerStates(player);
 
         foreach (var player in players.Values)
         {
@@ -657,6 +645,48 @@ void SendStats(Player player, long atTick)
     // Unreliable: a dropped stats packet is replaced by the next heartbeat, and
     // the client interpolates time-of-day locally between beats.
     player.Peer.Send(writer, DeliveryMethod.Unreliable);
+}
+
+// Interest-filtered snapshot (architecture invariant #6, InterestRules): each
+// player only hears about others within InterestRules.PlayerRadiusMetres, so
+// bandwidth stays bounded as the population grows instead of every tick
+// costing every client O(playerCount). A player who falls out of range is
+// told explicitly via PlayerLeft — otherwise its avatar would freeze in place
+// on the client rather than despawn, since it never actually disconnected.
+void SendPlayerStates(Player player)
+{
+    var inRange = new List<Player>();
+    var currentlyVisible = new HashSet<int>();
+    foreach (var other in players.Values)
+    {
+        if (other.Id == player.Id) continue;
+        if (!InterestRules.IsVisible(player.Position, other.Position)) continue;
+        inRange.Add(other);
+        currentlyVisible.Add(other.Id);
+    }
+
+    writer.Reset();
+    writer.Put((byte)MessageId.PlayerStates);
+    writer.Put((byte)inRange.Count);
+    foreach (var other in inRange)
+    {
+        writer.Put(other.Id);
+        writer.Put((float)other.Position.X);
+        writer.Put((float)other.Position.Y);
+        writer.Put((float)other.Position.Z);
+        writer.Put(other.Yaw);
+    }
+    // Unreliable: a dropped snapshot is replaced by the next one 66ms later.
+    player.Peer.Send(writer, DeliveryMethod.Unreliable);
+
+    foreach (int goneId in InterestRules.NewlyOutOfRange(player.LastVisiblePlayerIds, currentlyVisible))
+    {
+        writer.Reset();
+        writer.Put((byte)MessageId.PlayerLeft);
+        writer.Put(goneId);
+        player.Peer.Send(writer, DeliveryMethod.ReliableOrdered);
+    }
+    player.LastVisiblePlayerIds = currentlyVisible;
 }
 
 static void WriteStructurePlaced(NetDataWriter data, Structure structure)

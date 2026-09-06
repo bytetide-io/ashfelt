@@ -42,6 +42,13 @@ public sealed class Player
     public Dictionary<ItemId, int> Inventory { get; } = new();
     public bool InventoryDirty { get; set; }
 
+    /// <summary>
+    /// IDs this player was sent as visible last tick (<see cref="InterestRules"/>).
+    /// Diffed against this tick's visible set so a player who falls out of range
+    /// gets an explicit "gone" rather than a frozen avatar on the client.
+    /// </summary>
+    public HashSet<int> LastVisiblePlayerIds { get; set; } = new();
+
     /// <summary>Authoritative survival meters. Spawns full; drains on the tick.</summary>
     public SurvivalRules.SurvivalState Survival { get; private set; } = SurvivalRules.SurvivalState.Full;
 
