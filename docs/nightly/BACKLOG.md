@@ -4,6 +4,49 @@ Ranked ideas and findings not yet built/fixed, newest audit first. Score is
 Severity(1-5) × Blast radius(1-5) at the time it was logged — re-score if you
 suspect the codebase has moved since.
 
+## From 2026-08-25 audit
+
+### Multiplayer correctness
+
+- **[FIXED 2026-08-25]** ~~`apps/world-server/Program.cs`'s message dispatch
+  (`NetworkReceiveEvent`) had no exception guard around parsing, so any
+  malformed or truncated packet on any message type could throw an
+  unhandled exception straight out of the single tick loop and crash the
+  whole process — every connected player on that world, not just the
+  sender.~~ Score: Severity 5 (total process crash) × Blast radius 5
+  (every connected player) = **25**. Found while reading the new
+  `CommitBlueprint` handler (the first message with a client-declared loop
+  count parsed field-by-field, which makes the read-past-the-buffer case
+  easy to reach), but the exposure was pre-existing on every handler, not
+  new to blueprints. Fixed by wrapping the parse+dispatch in a try/catch
+  that logs and disconnects the offending peer — see `LOG.md`.
+
+Carried forward, unchanged, from the 2026-07-24 audit below: the
+Hello-blocking-the-tick-loop finding (score 20) is still open — still a
+real architecture change, not a one-night fix, and doubly so with no
+compiler available to verify an async restructuring. Not re-attempted
+tonight for the same reason the last session gave.
+
+### Testing
+
+- Still true, and now covers more surface: `apps/world-server` and
+  `apps/gateway` have zero automated tests, including the new
+  `BuildSite`/`BuildingRules` server-authority checks (`Owner`/reach/
+  support/stockpile) exercised by `CommitBlueprint`/`DepositRequest`/
+  `BuildRequest`/`CancelBlueprint`, and now the packet-parse crash guard
+  fixed tonight has no regression test either. `packages/sim-core`'s own
+  new `BuildSiteTests.cs`/`BuildingRulesTests.cs`/`StructureCatalogTests.cs`
+  are solid — this gap is specifically the server/gateway integration
+  layer, same as logged 2026-07-24.
+
+### Architecture / maintainability
+
+- `apps/world-server/Program.cs` is now 759 lines (was 468 on 2026-07-24,
+  before blueprint building). Not re-scored tonight — no new finding, just
+  flagging that the top-level-statements single-file server is growing
+  every feature adds a case to the same switch, same as the client
+  god-scripts already logged below.
+
 ## From 2026-07-24 audit
 
 ### Multiplayer correctness
