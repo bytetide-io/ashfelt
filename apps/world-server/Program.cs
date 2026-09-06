@@ -137,9 +137,24 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
             // has an empty ticket and claims below instead.
             if (ticketText.Length > 0)
             {
-                bool claimed = Guid.TryParse(ticketText, out var ticket)
-                    && gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId)
-                        .GetAwaiter().GetResult();
+                bool claimed;
+                try
+                {
+                    claimed = Guid.TryParse(ticketText, out var ticket)
+                        && gateway.ClaimVoyageAsync(player.CharacterId, ticket, worldId)
+                            .GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    // This runs on the world-server's single tick/packet-processing
+                    // thread: an uncaught exception here doesn't just fail this
+                    // join, it propagates out of server.PollEvents() and crashes
+                    // the process for every already-connected player. A gateway
+                    // hiccup must deny this one join instead.
+                    Console.Error.WriteLine($"[world] voyage claim failed for {player.CharacterId}: {ex.Message}");
+                    peer.Disconnect();
+                    break;
+                }
                 if (!claimed)
                 {
                     Console.WriteLine($"[world] rejecting voyage for {player.CharacterId}: bad ticket");
